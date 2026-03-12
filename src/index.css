@@ -1,0 +1,104 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+:root {
+  /* OpenClaw Studio Professional Dark Theme */
+  --bg-base: #0b1118;
+  --bg-sidebar: #0f1721;
+  --bg-surface: #121a24;
+  --bg-surface-hover: #1a2533;
+  --bg-surface-secondary: #223142;
+  
+  --primary: #22a8cc;
+  --primary-hover: #30bce2;
+  --primary-foreground: #f7fcef;
+  
+  --text-primary: rgba(246, 250, 255, 0.97);
+  --text-secondary: rgba(224, 236, 248, 0.78);
+  --text-muted: rgba(224, 236, 248, 0.5);
+  
+  --border-subtle: rgba(108, 146, 176, 0.24);
+  --border-base: rgba(108, 146, 176, 0.3);
+  
+  --success: #20aa68;
+  --error: #ef4444;
+  --warning: #f59e0b;
+  
+  /* Typography */
+  --font-sans: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+  --font-mono: 'IBM Plex Mono', monospace;
+  
+  /* Radii */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  
+  /* OpenClaw Shadows */
+  --shadow-sm: 0 2px 6px rgba(8, 12, 18, 0.16);
+  --shadow-md: 0 7px 18px -9px rgba(8, 12, 18, 0.35);
+  
+  --transition-fast: 150ms ease;
+  --transition-normal: 250ms ease;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--bg-base);
+  color: var(--text-primary);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+  margin: 0;
+  overflow: hidden;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+
+a {
+  color: var(--primary);
+  text-decoration: none;
+  transition: color var(--transition-fast);
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+/* OpenClaw Panel Style */
+.ui-panel {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+.heading-gradient {
+  color: var(--text-primary);
+}
+
+/* Animations matching OpenClaw's subtle fade */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fadeUp 0.4s ease-out forwards;
+}
+
+#root {
+  display: flex;
+  height: 100vh;
+  width: 100%;
+}

@@ -1,0 +1,613 @@
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import asyncio
+import json
+import uuid
+import time
+import os
+import re
+import shutil
+import yaml
+from pathlib import Path
+from typing import Optional
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def get_hermes_cmd():
+    """Return the hermes executable path, respecting env override."""
+    return os.environ.get("HERMES_AGENT_CMD", "hermes")
+
+
+def get_hermes_config() -> dict:
+    """Read the user's ~/.hermes/config.yaml and return as dict."""
+    config_path = Path.home() / ".hermes" / "config.yaml"
+    try:
+        if config_path.exists():
+            with open(config_path) as f:
+                return yaml.safe_load(f) or {}
+    except Exception:
+        pass
+    return {}
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from text."""
+    return re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])').sub('', text)
+
+
+VALID_PROVIDERS = [
+    "auto", "openrouter", "nous", "openai-codex",
+    "zai", "kimi-coding", "minimax", "minimax-cn",
+]
+
+
+# ---------------------------------------------------------------------------
+# Health / Status endpoints  (REAL — no mocks)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/health")
+async def health_check():
+    """
+    Run `hermes doctor` (or at minimum check the binary exists) and return
+    structured health information so the frontend can show real status.
+    """
+    hermes_cmd = get_hermes_cmd()
+
+    # 1. Check binary exists
+    binary_path = shutil.which(hermes_cmd)
+    if not binary_path:
+        return {
+            "installed": False,
+            "status": "not_installed",
+            "binary": None,
+            "model": None,
+            "provider": None,
+            "version": None,
+            "details": [],
+        }
+
+    # 2. Get version
+    version = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            hermes_cmd, "version",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=os.environ.copy(),
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        version = strip_ansi(stdout.decode().strip()) or None
+    except Exception:
+        pass
+
+    # 3. Run `hermes doctor` for real diagnostics
+    details: list[dict] = []
+    doctor_ok = True
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            hermes_cmd, "doctor",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=os.environ.copy(),
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+        raw = strip_ansi(stdout.decode())
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("✓"):
+                details.append({"ok": True, "text": line[1:].strip()})
+            elif line.startswith("✗"):
+                details.append({"ok": False, "text": line[1:].strip()})
+                doctor_ok = False
+            elif line.startswith("⚠"):
+                details.append({"ok": True, "warn": True, "text": line[1:].strip()})
+    except Exception:
+        doctor_ok = False
+
+    # 4. Read model & provider from config
+    hermes_cfg = get_hermes_config()
+    model = hermes_cfg.get("model")
+    provider = hermes_cfg.get("provider", "auto")
+
+    return {
+        "installed": True,
+        "status": "ready" if doctor_ok else "degraded",
+        "binary": binary_path,
+        "model": model,
+        "provider": provider,
+        "version": version,
+        "details": details,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Configuration endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/config/full")
+async def get_full_config():
+    """Return the full parsed Hermes config + API key status from `hermes status`."""
+    hermes_cmd = get_hermes_cmd()
+    hermes_cfg = get_hermes_config()
+
+    # Parse API key status from `hermes status`
+    api_keys = {}
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            hermes_cmd, "status",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=os.environ.copy(),
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        raw = strip_ansi(stdout.decode())
+        in_api_keys = False
+        for line in raw.splitlines():
+            stripped = line.strip()
+            if "API Keys" in stripped:
+                in_api_keys = True
+                continue
+            if in_api_keys:
+                if stripped.startswith("◆") or not stripped:
+                    if stripped.startswith("◆") and "API Keys" not in stripped:
+                        in_api_keys = False
+                    continue
+                # Parse lines like "OpenRouter    ✗ (not set)" or "OpenAI        ✓ ***"
+                if "✓" in stripped:
+                    name = stripped.split("✓")[0].strip()
+                    api_keys[name] = True
+                elif "✗" in stripped:
+                    name = stripped.split("✗")[0].strip()
+                    api_keys[name] = False
+    except Exception:
+        pass
+
+    # Get personalities from config
+    personalities = list(hermes_cfg.get("personalities", {}).keys())
+
+    return {
+        "model": hermes_cfg.get("model", ""),
+        "provider": hermes_cfg.get("provider", "auto"),
+        "max_turns": hermes_cfg.get("max_turns", 60),
+        "personality": hermes_cfg.get("display", {}).get("personality", ""),
+        "personalities": personalities,
+        "terminal_backend": hermes_cfg.get("terminal", {}).get("backend", "local"),
+        "compression": {
+            "enabled": hermes_cfg.get("compression", {}).get("enabled", True),
+            "threshold": hermes_cfg.get("compression", {}).get("threshold", 0.85),
+            "model": hermes_cfg.get("compression", {}).get("summary_model", ""),
+        },
+        "api_keys": api_keys,
+        "valid_providers": VALID_PROVIDERS,
+    }
+
+
+class ModelUpdate(BaseModel):
+    model: str
+
+
+class ProviderUpdate(BaseModel):
+    provider: str
+
+
+class ProviderKeyUpdate(BaseModel):
+    provider: str
+    key: str
+
+
+@app.post("/api/config/model")
+async def update_model(body: ModelUpdate):
+    """Set default model via `hermes config set model <value>`."""
+    hermes_cmd = get_hermes_cmd()
+    model_val = body.model.strip()
+    if not model_val:
+        return {"status": "error", "message": "Model name cannot be empty."}
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            hermes_cmd, "config", "set", "model", model_val,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=os.environ.copy(),
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        if proc.returncode != 0:
+            err = strip_ansi(stderr.decode().strip() or stdout.decode().strip())
+            return {"status": "error", "message": f"Failed to set model: {err}"}
+        return {"status": "success", "model": model_val}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/config/provider")
+async def update_provider(body: ProviderUpdate):
+    """Set default provider via `hermes config set provider <value>`."""
+    hermes_cmd = get_hermes_cmd()
+    prov_val = body.provider.strip()
+    
+    if prov_val not in VALID_PROVIDERS:
+        return {"status": "error", "message": f"Invalid provider '{prov_val}'"}
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            hermes_cmd, "config", "set", "provider", prov_val,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=os.environ.copy(),
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        if proc.returncode != 0:
+            err = strip_ansi(stderr.decode().strip() or stdout.decode().strip())
+            return {"status": "error", "message": f"Failed to set provider: {err}"}
+        return {"status": "success", "provider": prov_val}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/config/apikey")
+async def update_apikey(body: ProviderKeyUpdate):
+    """Set provider API key via `hermes config set api_keys.<provider> <key>`."""
+    hermes_cmd = get_hermes_cmd()
+    prov_val = body.provider.strip().lower()
+    key_val = body.key.strip()
+    
+    if not prov_val or not key_val:
+        return {"status": "error", "message": "Provider and key cannot be empty."}
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            hermes_cmd, "config", "set", f"api_keys.{prov_val}", key_val,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=os.environ.copy(),
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        if proc.returncode != 0:
+            err = strip_ansi(stderr.decode().strip() or stdout.decode().strip())
+            return {"status": "error", "message": f"Failed to set API key: {err}"}
+        return {"status": "success", "provider": prov_val}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Sessions endpoint
+# ---------------------------------------------------------------------------
+
+@app.get("/api/sessions")
+async def list_sessions():
+    """List sessions from `hermes sessions list`."""
+    hermes_cmd = get_hermes_cmd()
+    sessions = []
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            hermes_cmd, "sessions", "list",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=os.environ.copy(),
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+        raw = strip_ansi(stdout.decode())
+
+        # Parse table output: ID | Title | Date | Messages | Duration
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line or line.startswith("─") or line.startswith("│") is False:
+                # Skip non-table lines but try to parse tabular data
+                pass
+            # Try to parse space-separated or pipe-separated columns
+            # Format varies, so be flexible
+            parts = [p.strip() for p in line.split("│") if p.strip()]
+            if len(parts) >= 3:
+                # Skip header rows
+                if parts[0].lower() in ("id", "session"):
+                    continue
+                session = {
+                    "id": parts[0],
+                    "title": parts[1] if len(parts) > 1 else "",
+                    "date": parts[2] if len(parts) > 2 else "",
+                    "messages": parts[3] if len(parts) > 3 else "",
+                    "duration": parts[4] if len(parts) > 4 else "",
+                }
+                sessions.append(session)
+    except Exception:
+        pass
+
+    return {"sessions": sessions}
+
+
+# ---------------------------------------------------------------------------
+# Legacy config/status endpoints (kept for compatibility)
+# ---------------------------------------------------------------------------
+
+class ConfigModel(BaseModel):
+    provider: str
+    apiKey: str
+
+
+current_config = {"provider": "local", "apiKey": ""}
+
+
+@app.post("/api/config")
+async def update_config(config: ConfigModel):
+    current_config["provider"] = config.provider
+    current_config["apiKey"] = config.apiKey
+    return {"status": "success", "message": "Configuration updated."}
+
+
+@app.get("/api/status")
+async def get_status():
+    """Return full hermes status output as structured data."""
+    hermes_cmd = get_hermes_cmd()
+    hermes_cfg = get_hermes_config()
+
+    status_data = {
+        "status": "online",
+        "model": hermes_cfg.get("model", ""),
+        "provider": hermes_cfg.get("provider", "auto"),
+        "uptime": time.time(),
+    }
+
+    # Get richer status from `hermes status`
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            hermes_cmd, "status",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=os.environ.copy(),
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        raw = strip_ansi(stdout.decode())
+
+        # Parse gateway status
+        for line in raw.splitlines():
+            stripped = line.strip()
+            if "Gateway" in stripped and "Status:" in stripped:
+                if "✓" in stripped:
+                    status_data["gateway"] = "running"
+                else:
+                    status_data["gateway"] = "stopped"
+            if "Sessions" in stripped:
+                parts = stripped.split(":")
+                if len(parts) > 1:
+                    try:
+                        status_data["active_sessions"] = int(parts[1].strip())
+                    except ValueError:
+                        pass
+            if "Jobs" in stripped:
+                parts = stripped.split(":")
+                if len(parts) > 1:
+                    try:
+                        status_data["scheduled_jobs"] = int(parts[1].strip())
+                    except ValueError:
+                        pass
+    except Exception:
+        pass
+
+    return status_data
+
+
+# ---------------------------------------------------------------------------
+# WebSocket chat  (robust — handles disconnects, long-running hermes)
+# ---------------------------------------------------------------------------
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def safe_send(self, message: str, websocket: WebSocket) -> bool:
+        """Send a message, returning False if the socket is already closed."""
+        try:
+            await websocket.send_text(message)
+            return True
+        except (RuntimeError, WebSocketDisconnect, Exception):
+            # Socket already closed — swallow the error
+            self.disconnect(websocket)
+            return False
+
+
+manager = ConnectionManager()
+
+
+async def run_hermes_agent(
+    message: str,
+    run_id: str,
+    websocket: WebSocket,
+    session_id: Optional[str] = None,
+):
+    """Spawn `hermes chat -q <message>` and stream output over WS."""
+    hermes_cmd = get_hermes_cmd()
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+
+    # Build command args
+    cmd_args = [hermes_cmd, "chat", "-q", message]
+
+    # Read model & provider from config
+    hermes_cfg = get_hermes_config()
+    configured_model = hermes_cfg.get("model")
+    configured_provider = hermes_cfg.get("provider")
+
+    if configured_model:
+        cmd_args.extend(["--model", configured_model])
+    if configured_provider and configured_provider != "auto":
+        cmd_args.extend(["--provider", configured_provider])
+
+    # Session resume support
+    if session_id:
+        cmd_args.extend(["--resume", session_id])
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd_args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+
+        ok = await manager.safe_send(json.dumps({
+            "type": "stream_start",
+            "runId": run_id,
+        }), websocket)
+        if not ok:
+            process.kill()
+            return
+
+        # Also stream stderr so the user sees error messages (e.g. model not found)
+        async def stream_stderr():
+            while True:
+                line = await process.stderr.readline()
+                if not line:
+                    break
+                text = strip_ansi(line.decode("utf-8")).strip()
+                if text:
+                    await manager.safe_send(json.dumps({
+                        "type": "stream_chunk",
+                        "runId": run_id,
+                        "chunk": f"⚠ {text}\n",
+                        "isError": True,
+                    }), websocket)
+
+        stderr_task = asyncio.create_task(stream_stderr())
+
+        is_content_started = False
+
+        while True:
+            line = await process.stdout.readline()
+            if not line:
+                break
+
+            text = strip_ansi(line.decode("utf-8"))
+
+            # Skip banner/startup until we see the "Query:" echo
+            if "Query:" in text:
+                is_content_started = True
+                continue
+
+            if not is_content_started:
+                # Detect tool invocations in the startup output
+                if "> Agent invoking tool:" in text:
+                    tool_name = text.split("tool:")[1].strip()
+                    ok = await manager.safe_send(json.dumps({
+                        "type": "agent_event",
+                        "runId": run_id,
+                        "event": "tool_call",
+                        "tool": tool_name,
+                        "input": {},
+                    }), websocket)
+                    if not ok:
+                        process.kill()
+                        return
+                elif "> Tool [" in text and "] Result:" in text:
+                    parts = text.split("] Result:")
+                    tool_name = parts[0].split("[")[1]
+                    result = parts[1].strip()
+                    ok = await manager.safe_send(json.dumps({
+                        "type": "agent_event",
+                        "runId": run_id,
+                        "event": "tool_result",
+                        "tool": tool_name,
+                        "result": result,
+                    }), websocket)
+                    if not ok:
+                        process.kill()
+                        return
+                continue
+
+            # Skip separator lines
+            if text.strip() == "────────────────────────────────────────":
+                continue
+            # Skip the "Resume this session" footer lines
+            if text.strip().startswith("Resume this session"):
+                continue
+            if text.strip().startswith("Session:"):
+                continue
+            if text.strip().startswith("Duration:"):
+                continue
+            if text.strip().startswith("Messages:"):
+                continue
+            # Skip box drawing lines
+            if text.strip().startswith("─") and text.strip().endswith("─"):
+                continue
+            # Skip hermes agent header in response
+            if "⚕ Hermes" in text:
+                continue
+
+            if text.strip():
+                ok = await manager.safe_send(json.dumps({
+                    "type": "stream_chunk",
+                    "runId": run_id,
+                    "chunk": text,
+                }), websocket)
+                if not ok:
+                    process.kill()
+                    return
+
+        await stderr_task
+        await process.wait()
+
+        await manager.safe_send(json.dumps({
+            "type": "stream_end",
+            "runId": run_id,
+            "status": "ok",
+        }), websocket)
+
+    except Exception as e:
+        await manager.safe_send(json.dumps({
+            "type": "error",
+            "runId": run_id,
+            "message": str(e),
+        }), websocket)
+
+
+@app.websocket("/ws/chat")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            payload = json.loads(data)
+
+            if payload.get("action") == "chat.send":
+                run_id = str(uuid.uuid4())
+                user_msg = payload.get("message", "")
+                session_id = payload.get("sessionId")
+
+                await manager.safe_send(json.dumps({
+                    "type": "ack",
+                    "runId": run_id,
+                    "status": "started",
+                }), websocket)
+
+                # Run hermes in a background task
+                asyncio.create_task(
+                    run_hermes_agent(user_msg, run_id, websocket, session_id)
+                )
+
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
