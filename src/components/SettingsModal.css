@@ -1,0 +1,307 @@
+/* ── Settings Modal ── */
+.settings-modal-inner {
+  padding: 0;
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.settings-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-header-left .settings-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  background: var(--accent-gradient-soft);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent-primary);
+}
+
+.settings-header-left h2 {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.settings-source-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  background: var(--bg-surface);
+  padding: 4px 10px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-subtle);
+  margin-top: 12px;
+  margin-left: 24px;
+  margin-right: 24px;
+}
+
+/* ── Tabs ── */
+.settings-tabs {
+  display: flex;
+  padding: 0 24px;
+  gap: 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.settings-tab {
+  padding: 12px 16px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  border-bottom: 2px solid transparent;
+  transition: color var(--transition-fast), border-color var(--transition-fast);
+  cursor: pointer;
+  background: none;
+}
+.settings-tab:hover {
+  color: var(--text-secondary);
+}
+.settings-tab.active {
+  color: var(--accent-primary);
+  border-bottom-color: var(--accent-primary);
+}
+
+/* ── Body ── */
+.settings-body {
+  padding: 20px 24px;
+  max-height: 55vh;
+  overflow-y: auto;
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ── Form Groups ── */
+.cfg-form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cfg-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.cfg-hint {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.cfg-select-wrapper {
+  position: relative;
+}
+
+.cfg-select {
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  appearance: none;
+  cursor: pointer;
+  transition: border-color var(--transition-fast);
+}
+.cfg-select:focus {
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+}
+
+.cfg-input {
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  transition: border-color var(--transition-fast);
+}
+.cfg-input:focus {
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+}
+
+/* ── Model Chips ── */
+.cfg-model-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.cfg-chip {
+  padding: 5px 12px;
+  font-size: 0.75rem;
+  font-family: var(--font-mono);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+.cfg-chip:hover {
+  border-color: var(--accent-primary);
+  color: var(--text-primary);
+}
+.cfg-chip.active {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+/* ── Save Status ── */
+.cfg-save-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  font-size: 0.82rem;
+}
+.cfg-save-status.success {
+  background: var(--success-bg);
+  color: var(--success);
+  border: 1px solid rgba(52, 211, 153, 0.2);
+}
+.cfg-save-status.error {
+  background: var(--error-bg);
+  color: var(--error);
+  border: 1px solid rgba(248, 113, 113, 0.2);
+}
+
+.cfg-save-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px;
+  background: var(--accent-gradient);
+  color: #fff;
+  font-weight: 600;
+  font-size: 0.85rem;
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+  box-shadow: var(--accent-glow);
+  margin-top: 8px;
+}
+.cfg-save-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 0 30px rgba(99, 102, 241, 0.4);
+}
+.cfg-save-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── API Key Rows ── */
+.cfg-key-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  transition: border-color var(--transition-fast);
+}
+.cfg-key-row.set {
+  border-color: rgba(52, 211, 153, 0.2);
+}
+
+.cfg-key-row-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.cfg-key-name {
+  font-size: 0.85rem;
+  font-weight: 500;
+  text-transform: capitalize;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cfg-key-status {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+.cfg-key-status.configured {
+  color: var(--success);
+}
+
+.cfg-key-input-row {
+  display: flex;
+  gap: 8px;
+}
+.cfg-key-input-row .cfg-input {
+  flex: 1;
+  padding: 8px 12px;
+  font-size: 0.82rem;
+}
+.cfg-key-input-row .btn-primary {
+  padding: 8px 16px;
+  font-size: 0.82rem;
+  flex-shrink: 0;
+}
+
+/* ── Info Grid (System tab) ── */
+.cfg-info-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.cfg-info-item {
+  padding: 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cfg-info-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.cfg-info-value {
+  font-size: 0.82rem;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+
+.cfg-info {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}

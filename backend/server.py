@@ -44,6 +44,26 @@ def get_hermes_config() -> dict:
     return {}
 
 
+def get_model_from_config(cfg: dict) -> str:
+    """Extract model name from config — handles both flat and nested formats.
+    
+    Flat:   model: "anthropic/claude-sonnet-4"
+    Nested: model: { default: "qwen3.5:9b", provider: "custom", base_url: "..." }
+    """
+    model_val = cfg.get("model", "")
+    if isinstance(model_val, dict):
+        return model_val.get("default", "")
+    return model_val or ""
+
+
+def get_provider_from_config(cfg: dict) -> str:
+    """Extract provider from config — checks model.provider then top-level provider."""
+    model_val = cfg.get("model")
+    if isinstance(model_val, dict) and model_val.get("provider"):
+        return model_val.get("provider", "auto")
+    return cfg.get("provider", "auto")
+
+
 def strip_ansi(text: str) -> str:
     """Remove ANSI escape sequences from text."""
     return re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])').sub('', text)
@@ -122,8 +142,8 @@ async def health_check():
 
     # 4. Read model & provider from config
     hermes_cfg = get_hermes_config()
-    model = hermes_cfg.get("model")
-    provider = hermes_cfg.get("provider", "auto")
+    model = get_model_from_config(hermes_cfg)
+    provider = get_provider_from_config(hermes_cfg)
 
     return {
         "installed": True,
@@ -178,13 +198,14 @@ async def get_full_config():
     except Exception:
         pass
 
-    # Get personalities from config
-    personalities = list(hermes_cfg.get("personalities", {}).keys())
+    # Get personalities from config (can be under agent.personalities or top-level)
+    agent_cfg = hermes_cfg.get("agent", {})
+    personalities = list(agent_cfg.get("personalities", hermes_cfg.get("personalities", {})).keys())
 
     return {
-        "model": hermes_cfg.get("model", ""),
-        "provider": hermes_cfg.get("provider", "auto"),
-        "max_turns": hermes_cfg.get("max_turns", 60),
+        "model": get_model_from_config(hermes_cfg),
+        "provider": get_provider_from_config(hermes_cfg),
+        "max_turns": agent_cfg.get("max_turns", hermes_cfg.get("max_turns", 60)),
         "personality": hermes_cfg.get("display", {}).get("personality", ""),
         "personalities": personalities,
         "terminal_backend": hermes_cfg.get("terminal", {}).get("backend", "local"),
@@ -360,8 +381,8 @@ async def get_status():
 
     status_data = {
         "status": "online",
-        "model": hermes_cfg.get("model", ""),
-        "provider": hermes_cfg.get("provider", "auto"),
+        "model": get_model_from_config(hermes_cfg),
+        "provider": get_provider_from_config(hermes_cfg),
         "uptime": time.time(),
     }
 
@@ -450,8 +471,8 @@ async def run_hermes_agent(
 
     # Read model & provider from config
     hermes_cfg = get_hermes_config()
-    configured_model = hermes_cfg.get("model")
-    configured_provider = hermes_cfg.get("provider")
+    configured_model = get_model_from_config(hermes_cfg)
+    configured_provider = get_provider_from_config(hermes_cfg)
 
     if configured_model:
         cmd_args.extend(["--model", configured_model])

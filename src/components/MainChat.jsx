@@ -1,35 +1,41 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Settings, MessageSquare, Plus, Send, Zap, MoreVertical, Activity, Terminal, Loader2, WifiOff, Wifi, Cpu } from 'lucide-react';
-import { motion } from 'framer-motion';
-import ConfigPanel from './ConfigPanel';
-import SessionsPanel from './SessionsPanel';
-import StatusPanel from './StatusPanel';
+import { Send, Zap, Activity, Cpu, User, WifiOff, PanelRightOpen, PanelRightClose, Loader2 } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+import ConversationSidebar from './ConversationSidebar';
+import AgentActivityPanel from './AgentActivityPanel';
+import SettingsModal from './SettingsModal';
 import './MainChat.css';
+
+const SUGGESTIONS = [
+  'Analyze this codebase and suggest improvements',
+  'Write a Python script to automate backups',
+  'Search the web for the latest AI research',
+  'Help me debug this error message',
+];
 
 export default function MainChat({ initialConfig }) {
   const [inputVal, setInputVal] = useState('');
   const [messages, setMessages] = useState([]);
-  const [activeTab, setActiveTab] = useState('chat');
   const [ws, setWs] = useState(null);
-  const [connState, setConnState] = useState('connecting'); // connecting | connected | disconnected | error
+  const [connState, setConnState] = useState('connecting');
   const [isThinking, setIsThinking] = useState(false);
   const [activeModel, setActiveModel] = useState(initialConfig?.model || '');
   const [activeProvider, setActiveProvider] = useState(initialConfig?.provider || 'auto');
   const [resumeSessionId, setResumeSessionId] = useState(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [activityCollapsed, setActivityCollapsed] = useState(false);
+  const [toolEvents, setToolEvents] = useState([]);
 
   const messagesEndRef = useRef(null);
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
   const activeRuns = useRef(new Set());
+  const textareaRef = useRef(null);
 
+  // ── WebSocket Connection ──
   const connectWebSocket = useCallback(() => {
-    // Clean up previous
-    if (wsRef.current) {
-      wsRef.current.close();
-    }
-    if (reconnectTimer.current) {
-      clearTimeout(reconnectTimer.current);
-    }
+    if (wsRef.current) wsRef.current.close();
+    if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
 
     setConnState('connecting');
 
@@ -38,13 +44,6 @@ export default function MainChat({ initialConfig }) {
 
     socket.onopen = () => {
       setConnState('connected');
-      setMessages(prev => {
-        // Only add system message if this is the first connection
-        if (prev.length === 0) {
-          return [{ role: 'assistant', content: 'Connection established to Hermes Agent.', isSystem: true }];
-        }
-        return prev;
-      });
     };
 
     socket.onmessage = (event) => {
@@ -54,21 +53,35 @@ export default function MainChat({ initialConfig }) {
         activeRuns.current.add(data.runId);
         setIsThinking(true);
       } else if (data.type === 'agent_event') {
+        const time = new Date().toLocaleTimeString();
+        const isResult = data.event === 'tool_result';
+        const eventText = isResult
+          ? `${data.tool}: ${data.result}`
+          : data.tool;
+
+        // Add to activity timeline
+        setToolEvents(prev => [...prev, {
+          type: isResult ? 'tool-result' : 'tool-call',
+          text: eventText,
+          time,
+        }]);
+
+        // Inline tool display in chat
         setMessages(prev => {
           const runMsgIdx = prev.findIndex(m => m.runId === data.runId && m.role === 'assistant');
+          let toolDisplay = isResult
+            ? `Tool [${data.tool}] → ${data.result}`
+            : `⚡ ${data.tool}`;
+          let toolType = isResult ? 'result' : 'call';
+
           let newMsgs = [...prev];
-
-          let toolEventDisplay = data.event === 'tool_result'
-            ? `> Tool [${data.tool}] Result: ${data.result}`
-            : `> Agent invoking tool: ${data.tool}`;
-
           if (runMsgIdx !== -1) {
             newMsgs[runMsgIdx] = {
               ...newMsgs[runMsgIdx],
-              tools: [...(newMsgs[runMsgIdx].tools || []), toolEventDisplay],
+              tools: [...(newMsgs[runMsgIdx].tools || []), { text: toolDisplay, type: toolType }],
             };
           } else {
-            newMsgs.push({ role: 'assistant', runId: data.runId, content: '', tools: [toolEventDisplay] });
+            newMsgs.push({ role: 'assistant', runId: data.runId, content: '', tools: [{ text: toolDisplay, type: toolType }] });
           }
           return newMsgs;
         });
@@ -95,12 +108,15 @@ export default function MainChat({ initialConfig }) {
         });
       } else if (data.type === 'stream_end') {
         activeRuns.current.delete(data.runId);
-        if (activeRuns.current.size === 0) {
-          setIsThinking(false);
-        }
+        if (activeRuns.current.size === 0) setIsThinking(false);
       } else if (data.type === 'error') {
         setIsThinking(false);
         activeRuns.current.delete(data.runId);
+        setToolEvents(prev => [...prev, {
+          type: 'error',
+          text: data.message,
+          time: new Date().toLocaleTimeString(),
+        }]);
         setMessages(prev => [
           ...prev,
           { role: 'assistant', content: `Error: ${data.message}`, isSystem: true, isError: true },
@@ -111,10 +127,7 @@ export default function MainChat({ initialConfig }) {
     socket.onclose = () => {
       setConnState('disconnected');
       setIsThinking(false);
-      // Auto-reconnect after 3 seconds
-      reconnectTimer.current = setTimeout(() => {
-        connectWebSocket();
-      }, 3000);
+      reconnectTimer.current = setTimeout(() => connectWebSocket(), 3000);
     };
 
     socket.onerror = () => {
@@ -133,31 +146,49 @@ export default function MainChat({ initialConfig }) {
     };
   }, [connectWebSocket]);
 
+  // ── Auto-scroll ──
   const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
   useEffect(scrollToBottom, [messages, isThinking]);
 
+  // ── Auto-resize textarea ──
+  const adjustTextarea = () => {
+    const el = textareaRef.current;
+    if (el) {
+      el.style.height = 'auto';
+      el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+    }
+  };
+
+  // ── Send ──
   const handleSend = (e) => {
-    e.preventDefault();
+    e?.preventDefault();
     if (!inputVal.trim() || !ws || connState !== 'connected') return;
 
     const userMessage = inputVal;
     setInputVal('');
+    if (textareaRef.current) textareaRef.current.style.height = 'auto';
     setMessages(prev => [...prev, { role: 'user', content: userMessage }]);
 
     const payload = { action: 'chat.send', message: userMessage };
     if (resumeSessionId) {
       payload.sessionId = resumeSessionId;
-      // Clear after first use — subsequent messages continue in the session naturally
     }
 
     ws.send(JSON.stringify(payload));
   };
 
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  // ── Handlers ──
   const handleResumeSession = (sessionId) => {
     setResumeSessionId(sessionId);
-    setActiveTab('chat');
     setMessages(prev => [
       ...prev,
       { role: 'assistant', content: `Resuming session ${sessionId.slice(0, 8)}... Send a message to continue.`, isSystem: true },
@@ -166,8 +197,8 @@ export default function MainChat({ initialConfig }) {
 
   const handleNewChat = () => {
     setResumeSessionId(null);
-    setMessages([{ role: 'assistant', content: 'New task started. Connection to Hermes Agent active.', isSystem: true }]);
-    setActiveTab('chat');
+    setMessages([]);
+    setToolEvents([]);
   };
 
   const handleConfigChange = ({ model, provider }) => {
@@ -175,11 +206,9 @@ export default function MainChat({ initialConfig }) {
     setActiveProvider(provider);
   };
 
-  const connLabel = {
-    connecting: 'connecting...',
-    connected: 'connected',
-    disconnected: 'reconnecting...',
-    error: 'connection error',
+  const handleSuggestionClick = (text) => {
+    setInputVal(text);
+    textareaRef.current?.focus();
   };
 
   const connColor = {
@@ -188,149 +217,204 @@ export default function MainChat({ initialConfig }) {
     disconnected: 'var(--error)',
     error: 'var(--error)',
   };
+  const connClass = {
+    connecting: 'connecting',
+    connected: 'online',
+    disconnected: 'offline',
+    error: 'offline',
+  };
+
+  const hasMessages = messages.length > 0;
 
   return (
     <div className="chat-layout">
-      {/* Sidebar */}
-      <aside className="chat-sidebar">
-        <div className="sidebar-header">
-          <button className="new-chat-btn" onClick={handleNewChat}>
-            <Plus size={18} /> New Agent Task
-          </button>
-        </div>
+      {/* Left Rail — Conversation Sidebar */}
+      <ConversationSidebar
+        onNewChat={handleNewChat}
+        onResumeSession={handleResumeSession}
+        onOpenSettings={() => setSettingsOpen(true)}
+        activeSessionId={resumeSessionId}
+      />
 
-        <div className="sidebar-nav">
-          <p className="nav-label">Gateway Views</p>
-          <div className={`nav-item ${activeTab === 'chat' ? 'active' : ''}`} onClick={() => setActiveTab('chat')}>
-            <MessageSquare size={16} /> Chat
-          </div>
-          <div className={`nav-item ${activeTab === 'sessions' ? 'active' : ''}`} onClick={() => setActiveTab('sessions')}>
-            <Terminal size={16} /> Sessions
-          </div>
-          <div className={`nav-item ${activeTab === 'status' ? 'active' : ''}`} onClick={() => setActiveTab('status')}>
-            <Activity size={16} /> System Health
-          </div>
-        </div>
-
-        <div className="sidebar-footer">
-          <div className={`nav-item ${activeTab === 'config' ? 'active' : ''}`} onClick={() => setActiveTab('config')}>
-            <Settings size={18} /> Configuration
-          </div>
-        </div>
-      </aside>
-
-      {/* Main Area */}
+      {/* Center — Chat Panel */}
       <main className="chat-main">
-        {activeTab === 'config' ? (
-          <ConfigPanel onConfigChange={handleConfigChange} />
-        ) : activeTab === 'sessions' ? (
-          <SessionsPanel onResumeSession={handleResumeSession} />
-        ) : activeTab === 'status' ? (
-          <StatusPanel />
-        ) : (
-          <>
-            <header className="chat-topbar">
-              <div className="agent-status">
-                <div className="status-dot" style={{ background: connColor[connState] }} />
-                <span>
-                  Hermes Gateway{' '}
-                  <span style={{ color: connColor[connState], fontSize: '0.85rem' }}>
-                    {connLabel[connState]}
-                  </span>
-                </span>
-                {activeModel && (
-                  <div className="model-badge">
-                    <Cpu size={12} />
-                    <span>{activeModel}</span>
-                    {activeProvider && activeProvider !== 'auto' && (
-                      <span className="provider-tag">{activeProvider}</span>
-                    )}
-                  </div>
+        {/* Top Bar */}
+        <header className="chat-topbar">
+          <div className="topbar-left">
+            <div className="agent-status">
+              <div className={`status-dot ${connClass[connState]}`} />
+              <span className="agent-status-label">Hermes</span>
+              <span className="conn-label" style={{ color: connColor[connState] }}>
+                {connState === 'connected' ? 'Online' : connState === 'connecting' ? 'Connecting...' : 'Offline'}
+              </span>
+            </div>
+            {activeModel && (
+              <div className="model-badge">
+                <Cpu size={12} />
+                <span>{activeModel}</span>
+                {activeProvider && activeProvider !== 'auto' && (
+                  <span className="provider-tag">{activeProvider}</span>
                 )}
               </div>
-              <div className="topbar-actions">
-                {connState === 'disconnected' && (
-                  <button className="icon-btn" onClick={connectWebSocket} title="Reconnect">
-                    <WifiOff size={18} />
-                  </button>
-                )}
-                <button className="icon-btn"><Zap size={18} /></button>
-                <button className="icon-btn"><MoreVertical size={18} /></button>
-              </div>
-            </header>
+            )}
+          </div>
+          <div className="topbar-actions">
+            {connState === 'disconnected' && (
+              <button className="icon-btn" onClick={connectWebSocket} title="Reconnect">
+                <WifiOff size={16} />
+              </button>
+            )}
+            <button
+              className="icon-btn"
+              onClick={() => setActivityCollapsed(!activityCollapsed)}
+              title={activityCollapsed ? 'Show activity panel' : 'Hide activity panel'}
+            >
+              {activityCollapsed ? <PanelRightOpen size={16} /> : <PanelRightClose size={16} />}
+            </button>
+          </div>
+        </header>
 
-            <div className="message-feed">
-              {messages.map((msg, idx) => (
+        {/* Messages / Empty State */}
+        {!hasMessages ? (
+          <div className="chat-empty-state">
+            <div className="empty-state-icon">
+              <Zap size={28} color="var(--accent-primary)" />
+            </div>
+            <h1 className="empty-state-title heading-gradient">
+              What would you like Hermes to do?
+            </h1>
+            <p className="empty-state-subtitle">
+              Hermes is an autonomous AI agent that can browse the web, write code, manage files, and execute tasks.
+            </p>
+            <div className="suggestion-chips">
+              {SUGGESTIONS.map((s, i) => (
+                <button key={i} className="suggestion-chip" onClick={() => handleSuggestionClick(s)}>
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <div className="message-feed">
+            {messages.map((msg, idx) => {
+              if (msg.isSystem) {
+                return (
+                  <motion.div
+                    key={idx}
+                    className="message-row"
+                    style={{ justifyContent: 'center' }}
+                    initial={{ opacity: 0, y: 6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                  >
+                    <div className={`message-bubble system ${msg.isError ? 'error' : ''}`}>
+                      {msg.content}
+                    </div>
+                  </motion.div>
+                );
+              }
+
+              return (
                 <motion.div
                   key={idx}
-                  className="message-bubble-wrapper"
-                  initial={{ opacity: 0, y: 10 }}
+                  className={`message-row ${msg.role}`}
+                  initial={{ opacity: 0, y: 8 }}
                   animate={{ opacity: 1, y: 0 }}
-                  style={{ display: 'flex', flexDirection: 'column', width: '100%' }}
                 >
-                  <div className={`message-bubble ${msg.role} ${msg.isError ? 'error' : ''}`}>
-                    {msg.role === 'assistant' && !msg.isSystem && (
-                      <div className="assistant-header">
-                        <Zap size={14} fill="var(--primary)" /> Hermes Agent
+                  {msg.role === 'assistant' && (
+                    <div className="message-avatar agent">
+                      <Zap size={14} />
+                    </div>
+                  )}
+                  <div className={`message-bubble ${msg.role}`}>
+                    {/* Tool cards */}
+                    {msg.tools && msg.tools.length > 0 && (
+                      <div className="tool-cards">
+                        {msg.tools.map((t, i) => (
+                          <div key={i} className={`tool-event-card ${t.type === 'result' ? 'result' : ''}`}>
+                            {t.text || t}
+                          </div>
+                        ))}
                       </div>
                     )}
-                    <div className="message-content">
-                      {msg.tools && msg.tools.length > 0 && (
-                        <div className="tool-cards">
-                          {msg.tools.map((t, i) => (
-                            <div key={i} className="tool-event-card">
-                              {t}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      <div style={{ whiteSpace: 'pre-wrap' }}>{msg.content}</div>
-                    </div>
+                    <div className="message-content">{msg.content}</div>
                   </div>
+                  {msg.role === 'user' && (
+                    <div className="message-avatar user-avatar">
+                      <User size={14} />
+                    </div>
+                  )}
                 </motion.div>
-              ))}
+              );
+            })}
 
-              {/* Thinking indicator — shown while waiting for hermes response */}
-              {isThinking && (
-                <motion.div
-                  className="message-bubble-wrapper"
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  style={{ display: 'flex', flexDirection: 'column', width: '100%' }}
-                >
-                  <div className="message-bubble assistant thinking">
-                    <div className="assistant-header">
-                      <Zap size={14} fill="var(--primary)" /> Hermes Agent
-                    </div>
-                    <div className="thinking-indicator">
-                      <Loader2 size={16} className="spinner" />
-                      <span>Thinking...</span>
-                    </div>
+            {/* Thinking */}
+            {isThinking && (
+              <motion.div
+                className="message-row assistant"
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+              >
+                <div className="message-avatar agent">
+                  <Zap size={14} />
+                </div>
+                <div className="thinking-bubble">
+                  <div className="thinking-dots">
+                    <span className="thinking-dot" />
+                    <span className="thinking-dot" />
+                    <span className="thinking-dot" />
                   </div>
-                </motion.div>
-              )}
+                  <span className="thinking-text">Thinking...</span>
+                </div>
+              </motion.div>
+            )}
 
-              <div ref={messagesEndRef} />
-            </div>
-
-            <div className="chat-input-area">
-              <form className="input-container" onSubmit={handleSend}>
-                <input
-                  type="text"
-                  className="chat-input"
-                  placeholder={connState === 'connected' ? "Tell Hermes what to do..." : "Waiting for connection..."}
-                  value={inputVal}
-                  onChange={(e) => setInputVal(e.target.value)}
-                  disabled={connState !== 'connected'}
-                />
-                <button type="submit" className="send-btn" disabled={!inputVal.trim() || connState !== 'connected' || isThinking}>
-                  <Send size={18} />
-                </button>
-              </form>
-            </div>
-          </>
+            <div ref={messagesEndRef} />
+          </div>
         )}
+
+        {/* Input Area */}
+        <div className="chat-input-area">
+          <form className="input-container" onSubmit={handleSend}>
+            <textarea
+              ref={textareaRef}
+              className="chat-textarea"
+              placeholder={connState === 'connected' ? 'Tell Hermes what to do...' : 'Waiting for connection...'}
+              value={inputVal}
+              onChange={(e) => {
+                setInputVal(e.target.value);
+                adjustTextarea();
+              }}
+              onKeyDown={handleKeyDown}
+              disabled={connState !== 'connected'}
+              rows={1}
+            />
+            <button
+              type="submit"
+              className="send-btn"
+              disabled={!inputVal.trim() || connState !== 'connected' || isThinking}
+            >
+              <Send size={16} />
+            </button>
+          </form>
+        </div>
       </main>
+
+      {/* Right Rail — Agent Activity */}
+      <AgentActivityPanel
+        collapsed={activityCollapsed}
+        onToggle={() => setActivityCollapsed(!activityCollapsed)}
+        connState={connState}
+        activeModel={activeModel}
+        activeProvider={activeProvider}
+        toolEvents={toolEvents}
+      />
+
+      {/* Settings Modal */}
+      <SettingsModal
+        isOpen={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        onConfigChange={handleConfigChange}
+      />
     </div>
   );
 }
