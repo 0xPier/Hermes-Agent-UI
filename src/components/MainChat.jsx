@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import ConversationSidebar from './ConversationSidebar';
 import AgentActivityPanel from './AgentActivityPanel';
 import SettingsModal from './SettingsModal';
+import ErrorCard from './ErrorCard';
 import './MainChat.css';
 
 const SUGGESTIONS = [
@@ -31,10 +32,15 @@ export default function MainChat({ initialConfig }) {
   const reconnectTimer = useRef(null);
   const activeRuns = useRef(new Set());
   const textareaRef = useRef(null);
+  const isMounted = useRef(true);
 
   // ── WebSocket Connection ──
   const connectWebSocket = useCallback(() => {
-    if (wsRef.current) wsRef.current.close();
+    if (!isMounted.current) return;
+    if (wsRef.current && wsRef.current.readyState < 2) {
+      // Already open or connecting — skip
+      return;
+    }
     if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
 
     setConnState('connecting');
@@ -43,10 +49,12 @@ export default function MainChat({ initialConfig }) {
     const socket = new WebSocket(`${protocol}//${window.location.host}/ws/chat`);
 
     socket.onopen = () => {
+      if (!isMounted.current) { socket.close(); return; }
       setConnState('connected');
     };
 
     socket.onmessage = (event) => {
+      if (!isMounted.current) return;
       const data = JSON.parse(event.data);
 
       if (data.type === 'ack') {
@@ -127,7 +135,10 @@ export default function MainChat({ initialConfig }) {
     socket.onclose = () => {
       setConnState('disconnected');
       setIsThinking(false);
-      reconnectTimer.current = setTimeout(() => connectWebSocket(), 3000);
+      // Only reconnect if still mounted, with increasing delay
+      if (isMounted.current) {
+        reconnectTimer.current = setTimeout(() => connectWebSocket(), 5000);
+      }
     };
 
     socket.onerror = () => {
@@ -139,10 +150,15 @@ export default function MainChat({ initialConfig }) {
   }, []);
 
   useEffect(() => {
+    isMounted.current = true;
     connectWebSocket();
     return () => {
+      isMounted.current = false;
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
-      if (wsRef.current) wsRef.current.close();
+      if (wsRef.current) {
+        wsRef.current.onclose = null; // prevent reconnect on cleanup
+        wsRef.current.close();
+      }
     };
   }, [connectWebSocket]);
 
@@ -306,9 +322,13 @@ export default function MainChat({ initialConfig }) {
                     initial={{ opacity: 0, y: 6 }}
                     animate={{ opacity: 1, y: 0 }}
                   >
-                    <div className={`message-bubble system ${msg.isError ? 'error' : ''}`}>
-                      {msg.content}
-                    </div>
+                    {msg.isError ? (
+                      <ErrorCard message={msg.content} />
+                    ) : (
+                      <div className="message-bubble system">
+                        {msg.content}
+                      </div>
+                    )}
                   </motion.div>
                 );
               }

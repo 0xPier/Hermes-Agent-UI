@@ -1,5 +1,6 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import asyncio
 import json
@@ -21,6 +22,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Serve Static Assets (Production/Docker) ──
+# Mount the built frontend dist folder if it exists
+dist_path = Path(__file__).parent.parent / "dist"
+if dist_path.exists():
+    app.mount("/", StaticFiles(directory=str(dist_path), html=True), name="static")
+
 
 
 # ---------------------------------------------------------------------------
@@ -461,23 +469,18 @@ async def run_hermes_agent(
     websocket: WebSocket,
     session_id: Optional[str] = None,
 ):
-    """Spawn `hermes chat -q <message>` and stream output over WS."""
+    """Spawn `hermes chat -q <message> -Q` and stream output over WS.
+
+    Uses -Q (quiet) mode for clean programmatic output:
+    - No banner, no spinner, no tool previews
+    - Just the response text + session_id footer
+    """
     hermes_cmd = get_hermes_cmd()
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
 
-    # Build command args
-    cmd_args = [hermes_cmd, "chat", "-q", message]
-
-    # Read model & provider from config
-    hermes_cfg = get_hermes_config()
-    configured_model = get_model_from_config(hermes_cfg)
-    configured_provider = get_provider_from_config(hermes_cfg)
-
-    if configured_model:
-        cmd_args.extend(["--model", configured_model])
-    if configured_provider and configured_provider != "auto":
-        cmd_args.extend(["--provider", configured_provider])
+    # Build command args: -Q gives clean output without banner/spinner/tool previews
+    cmd_args = [hermes_cmd, "chat", "-q", message, "-Q"]
 
     # Session resume support
     if session_id:
@@ -499,7 +502,7 @@ async def run_hermes_agent(
             process.kill()
             return
 
-        # Also stream stderr so the user sees error messages (e.g. model not found)
+        # Stream stderr for error messages
         async def stream_stderr():
             while True:
                 line = await process.stderr.readline()
@@ -516,8 +519,7 @@ async def run_hermes_agent(
 
         stderr_task = asyncio.create_task(stream_stderr())
 
-        is_content_started = False
-
+        # In -Q mode, stdout is just the response text + "session_id: ..." footer
         while True:
             line = await process.stdout.readline()
             if not line:
@@ -525,69 +527,29 @@ async def run_hermes_agent(
 
             text = strip_ansi(line.decode("utf-8"))
 
-            # Skip banner/startup until we see the "Query:" echo
-            if "Query:" in text:
-                is_content_started = True
+            # Skip the session_id footer line
+            stripped = text.strip()
+            if stripped.startswith("session_id:"):
+                continue
+            # Skip "Exit code:" lines
+            if stripped.startswith("Exit code:"):
+                continue
+            # Skip the "hermes --resume" footer hint
+            if stripped.startswith("hermes --resume") or stripped.startswith("hermes -r"):
+                continue
+            # Skip empty lines at the very start
+            if not stripped:
                 continue
 
-            if not is_content_started:
-                # Detect tool invocations in the startup output
-                if "> Agent invoking tool:" in text:
-                    tool_name = text.split("tool:")[1].strip()
-                    ok = await manager.safe_send(json.dumps({
-                        "type": "agent_event",
-                        "runId": run_id,
-                        "event": "tool_call",
-                        "tool": tool_name,
-                        "input": {},
-                    }), websocket)
-                    if not ok:
-                        process.kill()
-                        return
-                elif "> Tool [" in text and "] Result:" in text:
-                    parts = text.split("] Result:")
-                    tool_name = parts[0].split("[")[1]
-                    result = parts[1].strip()
-                    ok = await manager.safe_send(json.dumps({
-                        "type": "agent_event",
-                        "runId": run_id,
-                        "event": "tool_result",
-                        "tool": tool_name,
-                        "result": result,
-                    }), websocket)
-                    if not ok:
-                        process.kill()
-                        return
-                continue
-
-            # Skip separator lines
-            if text.strip() == "────────────────────────────────────────":
-                continue
-            # Skip the "Resume this session" footer lines
-            if text.strip().startswith("Resume this session"):
-                continue
-            if text.strip().startswith("Session:"):
-                continue
-            if text.strip().startswith("Duration:"):
-                continue
-            if text.strip().startswith("Messages:"):
-                continue
-            # Skip box drawing lines
-            if text.strip().startswith("─") and text.strip().endswith("─"):
-                continue
-            # Skip hermes agent header in response
-            if "⚕ Hermes" in text:
-                continue
-
-            if text.strip():
-                ok = await manager.safe_send(json.dumps({
-                    "type": "stream_chunk",
-                    "runId": run_id,
-                    "chunk": text,
-                }), websocket)
-                if not ok:
-                    process.kill()
-                    return
+            # Stream the actual response text
+            ok = await manager.safe_send(json.dumps({
+                "type": "stream_chunk",
+                "runId": run_id,
+                "chunk": text,
+            }), websocket)
+            if not ok:
+                process.kill()
+                return
 
         await stderr_task
         await process.wait()
@@ -632,3 +594,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)

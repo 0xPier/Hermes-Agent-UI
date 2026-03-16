@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  hermes-ui:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - HERMES_AGENT_CMD=hermes
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # Mount the host ~/.hermes directory into the container to persist config/sessions
+      - ${HOME}/.hermes:/root/.hermes
+    restart: unless-stopped
