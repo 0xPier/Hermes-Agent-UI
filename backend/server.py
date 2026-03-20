@@ -11,7 +11,7 @@ import re
 import shutil
 import yaml
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 
 app = FastAPI()
 
@@ -360,7 +360,13 @@ async def update_apikey(body: ProviderKeyUpdate):
 
 @app.get("/api/sessions")
 async def list_sessions():
-    """List sessions from `hermes sessions list`."""
+    """List sessions from `hermes sessions list`.
+
+    The CLI outputs space-aligned columns like:
+        Preview                                            Last Active   Src    ID
+        ──────────────────────────────────────────────────────────────────────────
+        can u create a eays space invder like pixel game   9h ago        cli    20260320_095812_89c2
+    """
     hermes_cmd = get_hermes_cmd()
     sessions = []
 
@@ -374,27 +380,48 @@ async def list_sessions():
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
         raw = strip_ansi(stdout.decode())
 
-        # Parse table output: ID | Title | Date | Messages | Duration
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line or line.startswith("─") or line.startswith("│") is False:
-                # Skip non-table lines but try to parse tabular data
-                pass
-            # Try to parse space-separated or pipe-separated columns
-            # Format varies, so be flexible
-            parts = [p.strip() for p in line.split("│") if p.strip()]
-            if len(parts) >= 3:
-                # Skip header rows
-                if parts[0].lower() in ("id", "session"):
-                    continue
-                session = {
-                    "id": parts[0],
-                    "title": parts[1] if len(parts) > 1 else "",
-                    "date": parts[2] if len(parts) > 2 else "",
-                    "messages": parts[3] if len(parts) > 3 else "",
-                    "duration": parts[4] if len(parts) > 4 else "",
-                }
-                sessions.append(session)
+        lines = raw.splitlines()
+        # Step 1: Find the header line to determine column positions
+        header_idx = -1
+        col_positions = {}  # column_name -> start_index
+        for i, line in enumerate(lines):
+            if "ID" in line and ("Preview" in line or "Last Active" in line):
+                header_idx = i
+                # Find start positions of each known column header
+                for col_name in ["Preview", "Last Active", "Src", "ID"]:
+                    pos = line.find(col_name)
+                    if pos >= 0:
+                        col_positions[col_name] = pos
+                break
+
+        if header_idx < 0 or "ID" not in col_positions:
+            return {"sessions": sessions}
+
+        # Step 2: Parse data lines after header (skip separator lines)
+        for line in lines[header_idx + 1:]:
+            # Skip separator lines (─) and empty lines
+            if not line.strip() or all(c in "─ " for c in line.strip()):
+                continue
+
+            # Extract fields by column positions
+            id_pos = col_positions.get("ID", 0)
+            last_active_pos = col_positions.get("Last Active", 0)
+            src_pos = col_positions.get("Src", 0)
+
+            session_id = line[id_pos:].strip() if id_pos < len(line) else ""
+            if not session_id:
+                continue
+
+            preview = line[:last_active_pos].strip() if last_active_pos else ""
+            last_active = line[last_active_pos:src_pos].strip() if last_active_pos and src_pos else ""
+
+            sessions.append({
+                "id": session_id,
+                "title": preview or "Untitled Session",
+                "date": last_active,
+                "messages": "",
+                "duration": "",
+            })
     except Exception:
         pass
 
@@ -516,9 +543,10 @@ async def run_hermes_agent(
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
 
-    # Build command args: Remove -Q flag to capture tool events and responses
-    # -Q = quiet mode: no banner, no spinner, no tool previews — just response text
-    cmd_args = [hermes_cmd, "chat", "-q", message, "-Q"]
+    # Build command args: Do NOT use -Q (quiet mode) — it suppresses tool previews
+    # that the activity monitor needs to detect. The is_noise() filter handles
+    # banner/chrome output instead.
+    cmd_args = [hermes_cmd, "chat", "-q", message]
 
     # Session resume support
     if session_id:
