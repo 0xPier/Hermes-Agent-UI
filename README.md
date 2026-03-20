@@ -43,3 +43,43 @@ npm run dev
 
 Once both the backend and frontend are running, open the URL provided by Vite (usually `http://localhost:5173`) in your browser. 
 Follow the Guided Installation to configure the provider, and then you'll enter the Main Chat to interact with Hermes!
+
+---
+
+## 🐳 Docker (Production)
+
+The Docker setup runs the backend and serves the built React frontend from a single container — no separate frontend server needed.
+
+### Prerequisites
+
+- **Docker** and **Docker Compose** installed
+- **Ollama** running on the host machine (if using a local model)
+- **Hermes CLI** configured at `~/.hermes/config.yaml`
+
+### 1. Update your Ollama URL (local models only)
+
+If `~/.hermes/config.yaml` points to `http://localhost:11434`, update it to use the host gateway so Docker can reach Ollama on your machine:
+
+```yaml
+# ~/.hermes/config.yaml
+custom_providers:
+  - name: Local (localhost:11434)
+    base_url: http://host.docker.internal:11434/v1   # ← change this
+    api_key: ollama
+    model: qwen3.5:9b
+```
+
+### 2. Build and run
+
+```bash
+docker-compose up --build
+```
+
+The UI will be available at **`http://localhost:8000`**.
+
+### 3. Notes
+
+- Your `~/.hermes` directory is mounted into the container — config changes and sessions persist across restarts.
+- To run in the background: `docker-compose up -d`
+- To stop: `docker-compose down`
+- If using a cloud provider (Anthropic, OpenAI, etc.) instead of Ollama, no URL changes are needed.
