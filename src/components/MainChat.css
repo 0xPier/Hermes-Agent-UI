@@ -225,6 +225,82 @@
   white-space: pre-wrap;
 }
 
+/* ── Markdown Prose Styles ── */
+.message-content p {
+  margin: 0 0 0.5em;
+  line-height: 1.6;
+}
+.message-content p:last-child {
+  margin-bottom: 0;
+}
+
+.message-content strong {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.message-content em {
+  font-style: italic;
+}
+
+.message-content code {
+  font-family: var(--font-mono);
+  font-size: 0.82em;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border-subtle);
+}
+
+.message-content pre {
+  margin: 8px 0;
+  padding: 12px;
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+}
+
+.message-content pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.8em;
+}
+
+.message-content h1, .message-content h2, .message-content h3 {
+  margin: 0.8em 0 0.4em;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.message-content h1 { font-size: 1.1em; }
+.message-content h2 { font-size: 1em; }
+.message-content h3 { font-size: 0.92em; }
+
+.message-content ul, .message-content ol {
+  margin: 0.4em 0;
+  padding-left: 1.4em;
+}
+
+.message-content li {
+  margin-bottom: 0.2em;
+}
+
+.message-content a {
+  color: var(--accent-primary);
+  text-decoration: none;
+}
+.message-content a:hover {
+  text-decoration: underline;
+}
+
+.message-content blockquote {
+  margin: 0.5em 0;
+  padding-left: 12px;
+  border-left: 3px solid var(--accent-primary);
+  color: var(--text-secondary);
+}
+
 /* ── Tool Event Cards (inline) ── */
 .tool-cards {
   display: flex;

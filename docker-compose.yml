@@ -8,7 +8,27 @@ services:
     environment:
       - HERMES_AGENT_CMD=hermes
       - PYTHONUNBUFFERED=1
+      - LOG_LEVEL=INFO
+      # Ollama runs on the host — this makes host.docker.internal resolve correctly on Linux too
+      # If your Ollama URL in ~/.hermes/config.yaml uses localhost:11434, you need to update it
+      # to host.docker.internal:11434 for Docker to reach it, or set a custom provider URL.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       # Mount the host ~/.hermes directory into the container to persist config/sessions
       - ${HOME}/.hermes:/root/.hermes
+      # Mount system certificates for secure connections
+      - /etc/ssl/certs:/etc/ssl/certs:ro
     restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/api/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - hermes-network
+
+networks:
+  hermes-network:
+    driver: bridge

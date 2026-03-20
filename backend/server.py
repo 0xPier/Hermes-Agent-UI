@@ -23,11 +23,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Serve Static Assets (Production/Docker) ──
-# Mount the built frontend dist folder if it exists
-dist_path = Path(__file__).parent.parent / "dist"
-if dist_path.exists():
-    app.mount("/", StaticFiles(directory=str(dist_path), html=True), name="static")
 
 
 
@@ -238,6 +233,50 @@ class ProviderUpdate(BaseModel):
 class ProviderKeyUpdate(BaseModel):
     provider: str
     key: str
+
+
+class ConfigUpdate(BaseModel):
+    config: Dict[str, Any]
+
+
+def deep_update_dict(target: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+    """Deep update a dictionary with nested values."""
+    for key, value in updates.items():
+        if key in target and isinstance(target[key], dict) and isinstance(value, dict):
+            deep_update_dict(target[key], value)
+        else:
+            target[key] = value
+    return target
+
+
+@app.post("/api/config/update")
+async def update_config_deep(body: ConfigUpdate):
+    """Update configuration with nested key-value pairs via `hermes config set` commands."""
+    hermes_cmd = get_hermes_cmd()
+    config_updates = body.config
+    
+    try:
+        # Process each configuration update
+        for key_path, value in config_updates.items():
+            # Convert dot notation to hermes config set format
+            # e.g., "memory.char_limit" -> "memory.char_limit"
+            cmd_args = [hermes_cmd, "config", "set", key_path, str(value)]
+            
+            proc = await asyncio.create_subprocess_exec(
+                *cmd_args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=os.environ.copy(),
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+            
+            if proc.returncode != 0:
+                err = strip_ansi(stderr.decode().strip() or stdout.decode().strip())
+                return {"status": "error", "message": f"Failed to set {key_path}: {err}"}
+        
+        return {"status": "success", "updated_config": config_updates}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 
 @app.post("/api/config/model")
@@ -469,17 +508,16 @@ async def run_hermes_agent(
     websocket: WebSocket,
     session_id: Optional[str] = None,
 ):
-    """Spawn `hermes chat -q <message> -Q` and stream output over WS.
+    """Spawn `hermes chat -q <message>` and stream output over WS with tool events.
 
-    Uses -Q (quiet) mode for clean programmatic output:
-    - No banner, no spinner, no tool previews
-    - Just the response text + session_id footer
+    Captures both response text and tool execution events for the activity monitor.
     """
     hermes_cmd = get_hermes_cmd()
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
 
-    # Build command args: -Q gives clean output without banner/spinner/tool previews
+    # Build command args: Remove -Q flag to capture tool events and responses
+    # -Q = quiet mode: no banner, no spinner, no tool previews — just response text
     cmd_args = [hermes_cmd, "chat", "-q", message, "-Q"]
 
     # Session resume support
@@ -502,6 +540,43 @@ async def run_hermes_agent(
             process.kill()
             return
 
+        # Track tool events for activity monitor
+        current_tool = None
+        tool_output = []
+        banner_done = False  # Track whether we've passed any CLI banner noise
+
+        # Patterns that indicate CLI noise (banner, tables, metadata) to filter
+        NOISE_PATTERNS = [
+            "session_id:", "Exit code:", "hermes --resume", "hermes -r ",
+            "Resume this session", "Session:", "Duration:", "Messages:",
+            "Query:", "/help for commands", "commits behind", "run hermes update",
+            "tools ·", "skills ·",
+        ]
+
+        def is_noise(line: str) -> bool:
+            """Return True if the line looks like CLI banner/metadata noise."""
+            s = line.strip()
+            if not s:
+                return True
+            # Table borders and box-drawing characters
+            if s.startswith(("│", "┌", "└", "├", "┤", "┐", "┘", "─", "╭", "╰", "╮", "╯", "|")):
+                return True
+            # Lines that are just box-drawing/pipe characters and whitespace
+            if all(c in "│┌└├┤┐┘─╭╰╮╯| " for c in s):
+                return True
+            # Known noise patterns
+            for pattern in NOISE_PATTERNS:
+                if pattern in s:
+                    return True
+            # Hermes category listings (e.g., "leisure: find-nearby")
+            if ":" in s and any(cat in s.lower() for cat in [
+                "leisure:", "mcp:", "media:", "mlops:", "note-taking:", "productivity:",
+                "research:", "domain-intel:", "smart-home:", "social-media:", "software-development:",
+                "requesting-", "youtube-content", "axolotl,", "nano-pdf,",
+            ]):
+                return True
+            return False
+
         # Stream stderr for error messages
         async def stream_stderr():
             while True:
@@ -510,6 +585,16 @@ async def run_hermes_agent(
                     break
                 text = strip_ansi(line.decode("utf-8")).strip()
                 if text:
+                    # Check if this is a tool-related message
+                    if any(keyword in text.lower() for keyword in ['tool', 'executing', 'calling', 'result']):
+                        await manager.safe_send(json.dumps({
+                            "type": "agent_event",
+                            "event": "tool_call",
+                            "tool": "system",
+                            "result": text,
+                            "runId": run_id,
+                        }), websocket)
+                    
                     await manager.safe_send(json.dumps({
                         "type": "stream_chunk",
                         "runId": run_id,
@@ -519,29 +604,59 @@ async def run_hermes_agent(
 
         stderr_task = asyncio.create_task(stream_stderr())
 
-        # In -Q mode, stdout is just the response text + "session_id: ..." footer
+        # Process stdout line by line
         while True:
             line = await process.stdout.readline()
             if not line:
                 break
 
             text = strip_ansi(line.decode("utf-8"))
-
-            # Skip the session_id footer line
             stripped = text.strip()
-            if stripped.startswith("session_id:"):
-                continue
-            # Skip "Exit code:" lines
-            if stripped.startswith("Exit code:"):
-                continue
-            # Skip the "hermes --resume" footer hint
-            if stripped.startswith("hermes --resume") or stripped.startswith("hermes -r"):
-                continue
-            # Skip empty lines at the very start
-            if not stripped:
+
+            # Skip all noise (banner, tables, session metadata)
+            if is_noise(text):
                 continue
 
-            # Stream the actual response text
+            # Detect tool calls
+            if any(pattern in stripped.lower() for pattern in [
+                'calling', 'executing', 'tool:', 'using', 'running', 'searching', 
+                'browsing', 'reading', 'writing', 'creating', 'deleting', 'modifying'
+            ]) and any(tool in stripped.lower() for tool in [
+                'web_search', 'browse', 'read_file', 'write_file', 'shell', 'execute',
+                'google', 'search', 'browser', 'file', 'code', 'terminal'
+            ]):
+                tool_parts = stripped.split(':')
+                if len(tool_parts) > 1:
+                    tool_name = tool_parts[0].replace('Calling', '').replace('Executing', '').strip()
+                    tool_params = ':'.join(tool_parts[1:]).strip()
+                    
+                    await manager.safe_send(json.dumps({
+                        "type": "agent_event",
+                        "event": "tool_call",
+                        "tool": tool_name,
+                        "params": tool_params,
+                        "runId": run_id,
+                    }), websocket)
+                    
+                    current_tool = tool_name
+                    tool_output = []
+                continue
+            
+            # Detect tool results
+            if any(pattern in stripped.lower() for pattern in [
+                'result:', 'output:', 'response:', 'completed', 'returned', 'found'
+            ]):
+                await manager.safe_send(json.dumps({
+                    "type": "agent_event",
+                    "event": "tool_result",
+                    "tool": current_tool or "unknown",
+                    "result": stripped,
+                    "runId": run_id,
+                }), websocket)
+                current_tool = None
+                continue
+
+            # Send actual response text
             ok = await manager.safe_send(json.dumps({
                 "type": "stream_chunk",
                 "runId": run_id,
@@ -594,6 +709,16 @@ async def websocket_endpoint(websocket: WebSocket):
 
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+
+
+# ---------------------------------------------------------------------------
+# Static file serving (MUST be last — catches all unmatched routes)
+# ---------------------------------------------------------------------------
+dist_path = Path(__file__).parent.parent / "dist"
+if dist_path.exists():
+    app.mount("/", StaticFiles(directory=str(dist_path), html=True), name="static")
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)

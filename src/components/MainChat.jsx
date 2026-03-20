@@ -5,6 +5,7 @@ import ConversationSidebar from './ConversationSidebar';
 import AgentActivityPanel from './AgentActivityPanel';
 import SettingsModal from './SettingsModal';
 import ErrorCard from './ErrorCard';
+import ReactMarkdown from 'react-markdown';
 import './MainChat.css';
 
 const SUGGESTIONS = [
@@ -64,22 +65,26 @@ export default function MainChat({ initialConfig }) {
         const time = new Date().toLocaleTimeString();
         const isResult = data.event === 'tool_result';
         const eventText = isResult
-          ? `${data.tool}: ${data.result}`
-          : data.tool;
+          ? `${data.tool}: ${data.result || data.params}`
+          : `${data.tool}: ${data.params || 'executing'}`;
 
         // Add to activity timeline
         setToolEvents(prev => [...prev, {
           type: isResult ? 'tool-result' : 'tool-call',
           text: eventText,
           time,
+          rawData: data, // Store raw data for detailed view
+          tool: data.tool,
+          params: data.params,
+          result: data.result,
         }]);
 
         // Inline tool display in chat
         setMessages(prev => {
           const runMsgIdx = prev.findIndex(m => m.runId === data.runId && m.role === 'assistant');
           let toolDisplay = isResult
-            ? `Tool [${data.tool}] → ${data.result}`
-            : `⚡ ${data.tool}`;
+            ? `Tool [${data.tool}] → ${data.result || data.params || 'completed'}`
+            : `⚡ ${data.tool} ${data.params ? `(${data.params})` : ''}`;
           let toolType = isResult ? 'result' : 'call';
 
           let newMsgs = [...prev];
@@ -356,7 +361,11 @@ export default function MainChat({ initialConfig }) {
                         ))}
                       </div>
                     )}
-                    <div className="message-content">{msg.content}</div>
+                    <div className="message-content">
+                      {msg.role === 'assistant'
+                        ? <ReactMarkdown>{msg.content}</ReactMarkdown>
+                        : msg.content}
+                    </div>
                   </div>
                   {msg.role === 'user' && (
                     <div className="message-avatar user-avatar">
