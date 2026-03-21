@@ -3,7 +3,7 @@ import { Plus, Search, MessageSquare, Settings, Loader2, Zap, Clock, Hash } from
 import { motion, AnimatePresence } from 'framer-motion';
 import './ConversationSidebar.css';
 
-export default function ConversationSidebar({ onNewChat, onResumeSession, onOpenSettings, activeSessionId }) {
+export default function ConversationSidebar({ onNewChat, onResumeSession, onOpenSettings, activeSessionId, refreshTrigger }) {
   const [loading, setLoading] = useState(true);
   const [sessions, setSessions] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -21,7 +21,7 @@ export default function ConversationSidebar({ onNewChat, onResumeSession, onOpen
     }
   };
 
-  useEffect(() => { fetchSessions(); }, []);
+  useEffect(() => { fetchSessions(); }, [refreshTrigger]);
 
   // Group sessions by date
   const groupSessions = (sessions) => {
@@ -125,7 +125,7 @@ export default function ConversationSidebar({ onNewChat, onResumeSession, onOpen
                         {session.title || 'Untitled Session'}
                       </div>
                       <div className="session-item-meta">
-                        {session.date && <span>{session.date}</span>}
+                        {(session.relativeDate || session.date) && <span>{session.relativeDate || session.date}</span>}
                         {session.messages && (
                           <>
                             <span className="meta-dot" />

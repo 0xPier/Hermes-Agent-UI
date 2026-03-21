@@ -27,6 +27,7 @@ export default function MainChat({ initialConfig }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [activityCollapsed, setActivityCollapsed] = useState(false);
   const [toolEvents, setToolEvents] = useState([]);
+  const [sidebarRefresh, setSidebarRefresh] = useState(0);
 
   const messagesEndRef = useRef(null);
   const wsRef = useRef(null);
@@ -119,9 +120,15 @@ export default function MainChat({ initialConfig }) {
           }
           return prev;
         });
+      } else if (data.type === 'session_info') {
+        // Backend captured the session ID from hermes output — store it
+        // so subsequent messages in this chat window resume the same session
+        setResumeSessionId(data.sessionId);
       } else if (data.type === 'stream_end') {
         activeRuns.current.delete(data.runId);
         if (activeRuns.current.size === 0) setIsThinking(false);
+        // Refresh sidebar to show newly created/updated session
+        setSidebarRefresh(prev => prev + 1);
       } else if (data.type === 'error') {
         setIsThinking(false);
         activeRuns.current.delete(data.runId);
@@ -255,6 +262,7 @@ export default function MainChat({ initialConfig }) {
         onResumeSession={handleResumeSession}
         onOpenSettings={() => setSettingsOpen(true)}
         activeSessionId={resumeSessionId}
+        refreshTrigger={sidebarRefresh}
       />
 
       {/* Center — Chat Panel */}

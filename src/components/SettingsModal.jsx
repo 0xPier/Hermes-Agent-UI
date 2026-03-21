@@ -159,45 +159,27 @@ export default function SettingsModal({ isOpen, onClose, onConfigChange }) {
       const configUpdates = {};
 
       // General settings → real keys
-      if (generalSettings.max_turns !== 60) {
-        configUpdates['agent.max_turns'] = generalSettings.max_turns;
-      }
+      configUpdates['agent.max_turns'] = generalSettings.max_turns;
       if (generalSettings.personality) {
         configUpdates['display.personality'] = generalSettings.personality;
       }
 
       // Memory settings → real keys
-      if (contextSettings.memory_enabled !== true) {
-        configUpdates['memory.memory_enabled'] = contextSettings.memory_enabled;
-      }
-      if (contextSettings.memory_char_limit !== 2200) {
-        configUpdates['memory.memory_char_limit'] = contextSettings.memory_char_limit;
-      }
+      configUpdates['memory.memory_enabled'] = contextSettings.memory_enabled;
+      configUpdates['memory.memory_char_limit'] = contextSettings.memory_char_limit;
 
-      // Compression settings → real keys (these were already correct)
-      if (contextSettings.compression_enabled !== true) {
-        configUpdates['compression.enabled'] = contextSettings.compression_enabled;
-      }
-      if (contextSettings.compression_threshold !== 0.85) {
-        configUpdates['compression.threshold'] = contextSettings.compression_threshold;
-      }
+      // Compression settings → real keys
+      configUpdates['compression.enabled'] = contextSettings.compression_enabled;
+      configUpdates['compression.threshold'] = contextSettings.compression_threshold;
       if (contextSettings.summary_model) {
         configUpdates['compression.summary_model'] = contextSettings.summary_model;
       }
 
       // Voice settings → real keys
-      if (voiceSettings.stt_enabled !== false) {
-        configUpdates['stt.enabled'] = voiceSettings.stt_enabled;
-      }
-      if (voiceSettings.stt_provider !== 'local') {
-        configUpdates['stt.provider'] = voiceSettings.stt_provider;
-      }
-      if (voiceSettings.tts_provider !== 'edge') {
-        configUpdates['tts.provider'] = voiceSettings.tts_provider;
-      }
-      if (voiceSettings.auto_tts !== false) {
-        configUpdates['voice.auto_tts'] = voiceSettings.auto_tts;
-      }
+      configUpdates['stt.enabled'] = voiceSettings.stt_enabled;
+      configUpdates['stt.provider'] = voiceSettings.stt_provider;
+      configUpdates['tts.provider'] = voiceSettings.tts_provider;
+      configUpdates['voice.auto_tts'] = voiceSettings.auto_tts;
 
       // Send all updates
       if (Object.keys(configUpdates).length > 0) {

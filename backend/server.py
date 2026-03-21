@@ -12,6 +12,7 @@ import shutil
 import yaml
 from pathlib import Path
 from typing import Optional, Dict, Any
+from datetime import datetime, timedelta
 
 app = FastAPI()
 
@@ -22,8 +23,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -48,11 +47,7 @@ def get_hermes_config() -> dict:
 
 
 def get_model_from_config(cfg: dict) -> str:
-    """Extract model name from config — handles both flat and nested formats.
-    
-    Flat:   model: "anthropic/claude-sonnet-4"
-    Nested: model: { default: "qwen3.5:9b", provider: "custom", base_url: "..." }
-    """
+    """Extract model name from config — handles both flat and nested formats."""
     model_val = cfg.get("model", "")
     if isinstance(model_val, dict):
         return model_val.get("default", "")
@@ -72,6 +67,44 @@ def strip_ansi(text: str) -> str:
     return re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])').sub('', text)
 
 
+def parse_relative_date(date_str: str) -> str:
+    """Convert relative dates like '9h ago', 'yesterday', '4d ago' to ISO format.
+    
+    Falls back to returning the original string if parsing fails.
+    """
+    date_str = date_str.strip()
+    now = datetime.now()
+    
+    try:
+        if date_str == "just now":
+            return now.isoformat()
+        
+        if date_str == "yesterday":
+            return (now - timedelta(days=1)).isoformat()
+        
+        # Match patterns like "9h ago", "4d ago", "30m ago", "2w ago"
+        match = re.match(r'^(\d+)\s*(s|m|h|d|w)\s*ago$', date_str)
+        if match:
+            amount = int(match.group(1))
+            unit = match.group(2)
+            
+            delta_map = {
+                's': timedelta(seconds=amount),
+                'm': timedelta(minutes=amount),
+                'h': timedelta(hours=amount),
+                'd': timedelta(days=amount),
+                'w': timedelta(weeks=amount),
+            }
+            
+            delta = delta_map.get(unit)
+            if delta:
+                return (now - delta).isoformat()
+    except Exception:
+        pass
+    
+    return date_str
+
+
 VALID_PROVIDERS = [
     "auto", "openrouter", "nous", "openai-codex",
     "zai", "kimi-coding", "minimax", "minimax-cn",
@@ -79,18 +112,13 @@ VALID_PROVIDERS = [
 
 
 # ---------------------------------------------------------------------------
-# Health / Status endpoints  (REAL — no mocks)
+# Health / Status endpoints
 # ---------------------------------------------------------------------------
 
 @app.get("/api/health")
 async def health_check():
-    """
-    Run `hermes doctor` (or at minimum check the binary exists) and return
-    structured health information so the frontend can show real status.
-    """
     hermes_cmd = get_hermes_cmd()
 
-    # 1. Check binary exists
     binary_path = shutil.which(hermes_cmd)
     if not binary_path:
         return {
@@ -103,7 +131,6 @@ async def health_check():
             "details": [],
         }
 
-    # 2. Get version
     version = None
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -117,7 +144,6 @@ async def health_check():
     except Exception:
         pass
 
-    # 3. Run `hermes doctor` for real diagnostics
     details: list[dict] = []
     doctor_ok = True
     try:
@@ -143,7 +169,6 @@ async def health_check():
     except Exception:
         doctor_ok = False
 
-    # 4. Read model & provider from config
     hermes_cfg = get_hermes_config()
     model = get_model_from_config(hermes_cfg)
     provider = get_provider_from_config(hermes_cfg)
@@ -191,19 +216,23 @@ async def get_full_config():
                     if stripped.startswith("◆") and "API Keys" not in stripped:
                         in_api_keys = False
                     continue
-                # Parse lines like "OpenRouter    ✗ (not set)" or "OpenAI        ✓ ***"
                 if "✓" in stripped:
-                    name = stripped.split("✓")[0].strip()
+                    name = stripped.split("✓")[0].strip().lower()
                     api_keys[name] = True
                 elif "✗" in stripped:
-                    name = stripped.split("✗")[0].strip()
+                    name = stripped.split("✗")[0].strip().lower()
                     api_keys[name] = False
     except Exception:
         pass
 
-    # Get personalities from config (can be under agent.personalities or top-level)
     agent_cfg = hermes_cfg.get("agent", {})
     personalities = list(agent_cfg.get("personalities", hermes_cfg.get("personalities", {})).keys())
+
+    # Include memory and stt/tts/voice config for Settings modal
+    memory_cfg = hermes_cfg.get("memory", {})
+    stt_cfg = hermes_cfg.get("stt", {})
+    tts_cfg = hermes_cfg.get("tts", {})
+    voice_cfg = hermes_cfg.get("voice", {})
 
     return {
         "model": get_model_from_config(hermes_cfg),
@@ -216,6 +245,20 @@ async def get_full_config():
             "enabled": hermes_cfg.get("compression", {}).get("enabled", True),
             "threshold": hermes_cfg.get("compression", {}).get("threshold", 0.85),
             "model": hermes_cfg.get("compression", {}).get("summary_model", ""),
+        },
+        "memory": {
+            "memory_enabled": memory_cfg.get("memory_enabled", True),
+            "memory_char_limit": memory_cfg.get("memory_char_limit", 2200),
+        },
+        "stt": {
+            "enabled": stt_cfg.get("enabled", False),
+            "provider": stt_cfg.get("provider", "local"),
+        },
+        "tts": {
+            "provider": tts_cfg.get("provider", "edge"),
+        },
+        "voice": {
+            "auto_tts": voice_cfg.get("auto_tts", False),
         },
         "api_keys": api_keys,
         "valid_providers": VALID_PROVIDERS,
@@ -239,16 +282,6 @@ class ConfigUpdate(BaseModel):
     config: Dict[str, Any]
 
 
-def deep_update_dict(target: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
-    """Deep update a dictionary with nested values."""
-    for key, value in updates.items():
-        if key in target and isinstance(target[key], dict) and isinstance(value, dict):
-            deep_update_dict(target[key], value)
-        else:
-            target[key] = value
-    return target
-
-
 @app.post("/api/config/update")
 async def update_config_deep(body: ConfigUpdate):
     """Update configuration with nested key-value pairs via `hermes config set` commands."""
@@ -256,12 +289,8 @@ async def update_config_deep(body: ConfigUpdate):
     config_updates = body.config
     
     try:
-        # Process each configuration update
         for key_path, value in config_updates.items():
-            # Convert dot notation to hermes config set format
-            # e.g., "memory.char_limit" -> "memory.char_limit"
             cmd_args = [hermes_cmd, "config", "set", key_path, str(value)]
-            
             proc = await asyncio.create_subprocess_exec(
                 *cmd_args,
                 stdout=asyncio.subprocess.PIPE,
@@ -269,7 +298,6 @@ async def update_config_deep(body: ConfigUpdate):
                 env=os.environ.copy(),
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
-            
             if proc.returncode != 0:
                 err = strip_ansi(stderr.decode().strip() or stdout.decode().strip())
                 return {"status": "error", "message": f"Failed to set {key_path}: {err}"}
@@ -281,12 +309,10 @@ async def update_config_deep(body: ConfigUpdate):
 
 @app.post("/api/config/model")
 async def update_model(body: ModelUpdate):
-    """Set default model via `hermes config set model <value>`."""
     hermes_cmd = get_hermes_cmd()
     model_val = body.model.strip()
     if not model_val:
         return {"status": "error", "message": "Model name cannot be empty."}
-
     try:
         proc = await asyncio.create_subprocess_exec(
             hermes_cmd, "config", "set", "model", model_val,
@@ -305,13 +331,10 @@ async def update_model(body: ModelUpdate):
 
 @app.post("/api/config/provider")
 async def update_provider(body: ProviderUpdate):
-    """Set default provider via `hermes config set provider <value>`."""
     hermes_cmd = get_hermes_cmd()
     prov_val = body.provider.strip()
-    
     if prov_val not in VALID_PROVIDERS:
         return {"status": "error", "message": f"Invalid provider '{prov_val}'"}
-
     try:
         proc = await asyncio.create_subprocess_exec(
             hermes_cmd, "config", "set", "provider", prov_val,
@@ -330,14 +353,11 @@ async def update_provider(body: ProviderUpdate):
 
 @app.post("/api/config/apikey")
 async def update_apikey(body: ProviderKeyUpdate):
-    """Set provider API key via `hermes config set api_keys.<provider> <key>`."""
     hermes_cmd = get_hermes_cmd()
     prov_val = body.provider.strip().lower()
     key_val = body.key.strip()
-    
     if not prov_val or not key_val:
         return {"status": "error", "message": "Provider and key cannot be empty."}
-
     try:
         proc = await asyncio.create_subprocess_exec(
             hermes_cmd, "config", "set", f"api_keys.{prov_val}", key_val,
@@ -360,13 +380,7 @@ async def update_apikey(body: ProviderKeyUpdate):
 
 @app.get("/api/sessions")
 async def list_sessions():
-    """List sessions from `hermes sessions list`.
-
-    The CLI outputs space-aligned columns like:
-        Preview                                            Last Active   Src    ID
-        ──────────────────────────────────────────────────────────────────────────
-        can u create a eays space invder like pixel game   9h ago        cli    20260320_095812_89c2
-    """
+    """List sessions from `hermes sessions list` with proper date parsing."""
     hermes_cmd = get_hermes_cmd()
     sessions = []
 
@@ -381,13 +395,11 @@ async def list_sessions():
         raw = strip_ansi(stdout.decode())
 
         lines = raw.splitlines()
-        # Step 1: Find the header line to determine column positions
         header_idx = -1
-        col_positions = {}  # column_name -> start_index
+        col_positions = {}
         for i, line in enumerate(lines):
             if "ID" in line and ("Preview" in line or "Last Active" in line):
                 header_idx = i
-                # Find start positions of each known column header
                 for col_name in ["Preview", "Last Active", "Src", "ID"]:
                     pos = line.find(col_name)
                     if pos >= 0:
@@ -397,13 +409,10 @@ async def list_sessions():
         if header_idx < 0 or "ID" not in col_positions:
             return {"sessions": sessions}
 
-        # Step 2: Parse data lines after header (skip separator lines)
         for line in lines[header_idx + 1:]:
-            # Skip separator lines (─) and empty lines
             if not line.strip() or all(c in "─ " for c in line.strip()):
                 continue
 
-            # Extract fields by column positions
             id_pos = col_positions.get("ID", 0)
             last_active_pos = col_positions.get("Last Active", 0)
             src_pos = col_positions.get("Src", 0)
@@ -415,10 +424,14 @@ async def list_sessions():
             preview = line[:last_active_pos].strip() if last_active_pos else ""
             last_active = line[last_active_pos:src_pos].strip() if last_active_pos and src_pos else ""
 
+            # Convert relative dates to ISO for frontend groupSessions()
+            iso_date = parse_relative_date(last_active) if last_active else ""
+
             sessions.append({
                 "id": session_id,
                 "title": preview or "Untitled Session",
-                "date": last_active,
+                "date": iso_date,
+                "relativeDate": last_active,  # Keep original for display
                 "messages": "",
                 "duration": "",
             })
@@ -429,7 +442,7 @@ async def list_sessions():
 
 
 # ---------------------------------------------------------------------------
-# Legacy config/status endpoints (kept for compatibility)
+# Status endpoint
 # ---------------------------------------------------------------------------
 
 class ConfigModel(BaseModel):
@@ -449,7 +462,6 @@ async def update_config(config: ConfigModel):
 
 @app.get("/api/status")
 async def get_status():
-    """Return full hermes status output as structured data."""
     hermes_cmd = get_hermes_cmd()
     hermes_cfg = get_hermes_config()
 
@@ -460,7 +472,6 @@ async def get_status():
         "uptime": time.time(),
     }
 
-    # Get richer status from `hermes status`
     try:
         proc = await asyncio.create_subprocess_exec(
             hermes_cmd, "status",
@@ -471,7 +482,6 @@ async def get_status():
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
         raw = strip_ansi(stdout.decode())
 
-        # Parse gateway status
         for line in raw.splitlines():
             stripped = line.strip()
             if "Gateway" in stripped and "Status:" in stripped:
@@ -500,7 +510,7 @@ async def get_status():
 
 
 # ---------------------------------------------------------------------------
-# WebSocket chat  (robust — handles disconnects, long-running hermes)
+# WebSocket chat  (with session tracking & activity monitor)
 # ---------------------------------------------------------------------------
 
 class ConnectionManager:
@@ -516,12 +526,10 @@ class ConnectionManager:
             self.active_connections.remove(websocket)
 
     async def safe_send(self, message: str, websocket: WebSocket) -> bool:
-        """Send a message, returning False if the socket is already closed."""
         try:
             await websocket.send_text(message)
             return True
         except (RuntimeError, WebSocketDisconnect, Exception):
-            # Socket already closed — swallow the error
             self.disconnect(websocket)
             return False
 
@@ -535,18 +543,19 @@ async def run_hermes_agent(
     websocket: WebSocket,
     session_id: Optional[str] = None,
 ):
-    """Spawn `hermes chat -q <message>` and stream output over WS with tool events.
-
-    Captures both response text and tool execution events for the activity monitor.
+    """Spawn `hermes chat -q <message>` and stream output over WS.
+    
+    Key changes from original:
+    1. Captures session_id from hermes output and sends it to frontend
+    2. Parses structured tool events from hermes verbose output
+    3. Properly filters noise while preserving useful data
     """
     hermes_cmd = get_hermes_cmd()
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
 
-    # Build command args: Do NOT use -Q (quiet mode) — it suppresses tool previews
-    # that the activity monitor needs to detect. The is_noise() filter handles
-    # banner/chrome output instead.
-    cmd_args = [hermes_cmd, "chat", "-q", message]
+    # Build command: -q for single query, -v for verbose (tool activity)
+    cmd_args = [hermes_cmd, "chat", "-q", message, "-v"]
 
     # Session resume support
     if session_id:
@@ -568,35 +577,28 @@ async def run_hermes_agent(
             process.kill()
             return
 
-        # Track tool events for activity monitor
-        current_tool = None
-        tool_output = []
-        banner_done = False  # Track whether we've passed any CLI banner noise
-
-        # Patterns that indicate CLI noise (banner, tables, metadata) to filter
+        # ── Noise filter ──
+        # These patterns are CLI chrome/metadata that should never reach the user
         NOISE_PATTERNS = [
-            "session_id:", "Exit code:", "hermes --resume", "hermes -r ",
-            "Resume this session", "Session:", "Duration:", "Messages:",
-            "Query:", "/help for commands", "commits behind", "run hermes update",
+            "Exit code:", "hermes --resume", "hermes -r ",
+            "Resume this session", "Duration:", "Messages:",
+            "/help for commands", "commits behind", "run hermes update",
             "tools ·", "skills ·",
         ]
 
         def is_noise(line: str) -> bool:
-            """Return True if the line looks like CLI banner/metadata noise."""
             s = line.strip()
             if not s:
                 return True
-            # Table borders and box-drawing characters
-            if s.startswith(("│", "┌", "└", "├", "┤", "┐", "┘", "─", "╭", "╰", "╮", "╯", "|")):
+            # Box-drawing / banner
+            if s.startswith(("│", "┌", "└", "├", "┤", "┐", "┘", "─", "╭", "╰", "╮", "╯", "|", "──")):
                 return True
-            # Lines that are just box-drawing/pipe characters and whitespace
-            if all(c in "│┌└├┤┐┘─╭╰╮╯| " for c in s):
+            if all(c in "│┌└├┤┐┘─╭╰╮╯| ─" for c in s):
                 return True
-            # Known noise patterns
             for pattern in NOISE_PATTERNS:
                 if pattern in s:
                     return True
-            # Hermes category listings (e.g., "leisure: find-nearby")
+            # Category listings
             if ":" in s and any(cat in s.lower() for cat in [
                 "leisure:", "mcp:", "media:", "mlops:", "note-taking:", "productivity:",
                 "research:", "domain-intel:", "smart-home:", "social-media:", "software-development:",
@@ -605,7 +607,25 @@ async def run_hermes_agent(
                 return True
             return False
 
-        # Stream stderr for error messages
+        # ── Verbose output patterns for activity monitor ──
+        # These patterns appear in `-v` mode and indicate tool/agent activity
+        TOOL_CALL_PATTERN = re.compile(r'🔧\s*(?:Tool call|Calling|Using|Available tools):\s*(.*)', re.IGNORECASE)
+        API_CALL_PATTERN = re.compile(r'🔄\s*Making API call\s*#?(\d+)?/?(\d+)?', re.IGNORECASE)
+        TOOLSET_PATTERN = re.compile(r'✅\s*Enabled toolset\s+[\'"]?(\w+)[\'"]?:\s*(.*)', re.IGNORECASE)
+        TOOL_EXEC_PATTERN = re.compile(r'🛠️\s*(.*)', re.IGNORECASE)
+        RESULT_PATTERN = re.compile(r'(?:✅|✓|🎉)\s*(.*completed|.*result|.*finished|.*done)(.*)', re.IGNORECASE)
+        THINKING_PATTERN = re.compile(r'\[thinking\]\s*(.*)', re.IGNORECASE)  
+        SESSION_ID_PATTERN = re.compile(r'Session:\s+(\S+)')
+        QUERY_LINE_PATTERN = re.compile(r'^Query:\s+')
+        AI_INIT_PATTERN = re.compile(r'🤖\s*AI Agent initialized with model:\s*(.*)')
+        CONTEXT_PATTERN = re.compile(r'📊\s*Context limit:\s*(.*)')
+
+        # Track state
+        captured_session_id = None
+        in_response_block = False  # Track when we're inside the actual response
+        response_started = False   # Track if we've seen actual response content
+
+        # Stream stderr
         async def stream_stderr():
             while True:
                 line = await process.stderr.readline()
@@ -613,7 +633,6 @@ async def run_hermes_agent(
                     break
                 text = strip_ansi(line.decode("utf-8")).strip()
                 if text:
-                    # Check if this is a tool-related message
                     if any(keyword in text.lower() for keyword in ['tool', 'executing', 'calling', 'result']):
                         await manager.safe_send(json.dumps({
                             "type": "agent_event",
@@ -641,50 +660,175 @@ async def run_hermes_agent(
             text = strip_ansi(line.decode("utf-8"))
             stripped = text.strip()
 
-            # Skip all noise (banner, tables, session metadata)
-            if is_noise(text):
+            # ── 1. Capture session ID (appears at end of hermes output) ──
+            session_match = SESSION_ID_PATTERN.match(stripped)
+            if session_match:
+                captured_session_id = session_match.group(1)
+                continue  # Don't send to user
+
+            # Also catch "Session:  20260321_132717_748a54" format
+            if stripped.startswith("Session:"):
+                parts = stripped.split(":", 1)
+                if len(parts) > 1 and parts[1].strip():
+                    captured_session_id = parts[1].strip()
                 continue
 
-            # Detect tool calls
-            if any(pattern in stripped.lower() for pattern in [
-                'calling', 'executing', 'tool:', 'using', 'running', 'searching', 
-                'browsing', 'reading', 'writing', 'creating', 'deleting', 'modifying'
-            ]) and any(tool in stripped.lower() for tool in [
-                'web_search', 'browse', 'read_file', 'write_file', 'shell', 'execute',
-                'google', 'search', 'browser', 'file', 'code', 'terminal'
-            ]):
-                tool_parts = stripped.split(':')
-                if len(tool_parts) > 1:
-                    tool_name = tool_parts[0].replace('Calling', '').replace('Executing', '').strip()
-                    tool_params = ':'.join(tool_parts[1:]).strip()
-                    
-                    await manager.safe_send(json.dumps({
-                        "type": "agent_event",
-                        "event": "tool_call",
-                        "tool": tool_name,
-                        "params": tool_params,
-                        "runId": run_id,
-                    }), websocket)
-                    
-                    current_tool = tool_name
-                    tool_output = []
-                continue
+            # ── 2. Parse verbose tool/agent events for activity monitor ──
             
-            # Detect tool results
-            if any(pattern in stripped.lower() for pattern in [
-                'result:', 'output:', 'response:', 'completed', 'returned', 'found'
-            ]):
+            # API call events
+            api_match = API_CALL_PATTERN.match(stripped)
+            if api_match:
+                call_num = api_match.group(1) or "?"
+                max_calls = api_match.group(2) or "?"
+                await manager.safe_send(json.dumps({
+                    "type": "agent_event",
+                    "event": "tool_call",
+                    "tool": "API",
+                    "params": f"Call #{call_num}/{max_calls}",
+                    "runId": run_id,
+                }), websocket)
+                continue
+
+            # Request size info (📊 Request size: 2 messages, ~3,385 tokens)
+            if stripped.startswith("📊") and "Request size:" in stripped:
+                await manager.safe_send(json.dumps({
+                    "type": "agent_event",
+                    "event": "tool_call",
+                    "tool": "Context",
+                    "params": stripped.lstrip("📊").strip(),
+                    "runId": run_id,
+                }), websocket)
+                continue
+
+            # API call timing (⏱️  API call completed in 36.20s)
+            if stripped.startswith("⏱️") and "completed" in stripped:
                 await manager.safe_send(json.dumps({
                     "type": "agent_event",
                     "event": "tool_result",
-                    "tool": current_tool or "unknown",
-                    "result": stripped,
+                    "tool": "API",
+                    "result": stripped.lstrip("⏱️").strip(),
                     "runId": run_id,
                 }), websocket)
-                current_tool = None
                 continue
 
-            # Send actual response text
+            # AI Agent initialized
+            ai_match = AI_INIT_PATTERN.match(stripped)
+            if ai_match:
+                await manager.safe_send(json.dumps({
+                    "type": "agent_event",
+                    "event": "tool_call",
+                    "tool": "Agent",
+                    "params": f"Initialized with {ai_match.group(1)}",
+                    "runId": run_id,
+                }), websocket)
+                continue
+
+            # Toolset enabled events
+            toolset_match = TOOLSET_PATTERN.search(stripped)
+            if toolset_match:
+                await manager.safe_send(json.dumps({
+                    "type": "agent_event",
+                    "event": "tool_call",
+                    "tool": toolset_match.group(1),
+                    "params": toolset_match.group(2)[:80],
+                    "runId": run_id,
+                }), websocket)
+                continue
+
+            # Tool execution / loaded events
+            tool_exec_match = TOOL_EXEC_PATTERN.match(stripped)
+            if tool_exec_match:
+                detail = tool_exec_match.group(1).strip()
+                if "Final tool selection" in detail or "Loaded" in detail:
+                    await manager.safe_send(json.dumps({
+                        "type": "agent_event",
+                        "event": "tool_result",
+                        "tool": "Tools",
+                        "result": detail[:100],
+                        "runId": run_id,
+                    }), websocket)
+                continue
+
+            # Conversation started
+            if stripped.startswith("💬"):
+                await manager.safe_send(json.dumps({
+                    "type": "agent_event",
+                    "event": "tool_call",
+                    "tool": "Chat",
+                    "params": stripped.lstrip("💬").strip(),
+                    "runId": run_id,
+                }), websocket)
+                continue
+
+            # Conversation completed
+            if stripped.startswith("🎉"):
+                await manager.safe_send(json.dumps({
+                    "type": "agent_event",
+                    "event": "tool_result",
+                    "tool": "Chat",
+                    "result": stripped.lstrip("🎉").strip(),
+                    "runId": run_id,
+                }), websocket)
+                continue
+
+            # Thinking indicator
+            thinking_match = THINKING_PATTERN.match(stripped)
+            if thinking_match:
+                await manager.safe_send(json.dumps({
+                    "type": "agent_event",
+                    "event": "tool_call",
+                    "tool": "Thinking",
+                    "params": thinking_match.group(1)[:100],
+                    "runId": run_id,
+                }), websocket)
+                continue
+
+            # Context limit info
+            context_match = CONTEXT_PATTERN.match(stripped)
+            if context_match:
+                continue  # Skip — just noise
+
+            # 🤖 Assistant response prefix — start of actual response content
+            if stripped.startswith("🤖 Assistant:"):
+                response_started = True
+                # Extract the content after "🤖 Assistant:"
+                content = stripped[len("🤖 Assistant:"):].strip()
+                # Skip <think> blocks
+                if content.startswith("<think>"):
+                    continue
+                if content:
+                    ok = await manager.safe_send(json.dumps({
+                        "type": "stream_chunk",
+                        "runId": run_id,
+                        "chunk": content + "\n",
+                    }), websocket)
+                    if not ok:
+                        process.kill()
+                        return
+                continue
+
+            # Skip verbose-only info lines
+            if any(stripped.startswith(prefix) for prefix in [
+                "✅ Enabled", "⚠️", "🔗", "🔒", "🛡️",
+            ]):
+                continue
+
+            # Skip query echo and separator lines
+            if QUERY_LINE_PATTERN.match(stripped):
+                continue
+            if stripped.startswith("────") or stripped.startswith("═══"):
+                continue
+
+            # Skip <think> blocks from models like qwen
+            if stripped.startswith("<think>") or stripped.startswith("</think>"):
+                continue
+
+            # Skip all banner/noise
+            if is_noise(text):
+                continue
+
+            # ── 3. Send actual response text ──
+            # At this point, we've filtered out noise, verbose events, and metadata
             ok = await manager.safe_send(json.dumps({
                 "type": "stream_chunk",
                 "runId": run_id,
@@ -696,6 +840,14 @@ async def run_hermes_agent(
 
         await stderr_task
         await process.wait()
+
+        # ── 4. Send session_id to frontend for resume tracking ──
+        if captured_session_id:
+            await manager.safe_send(json.dumps({
+                "type": "session_info",
+                "runId": run_id,
+                "sessionId": captured_session_id,
+            }), websocket)
 
         await manager.safe_send(json.dumps({
             "type": "stream_end",
@@ -730,7 +882,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     "status": "started",
                 }), websocket)
 
-                # Run hermes in a background task
                 asyncio.create_task(
                     run_hermes_agent(user_msg, run_id, websocket, session_id)
                 )
