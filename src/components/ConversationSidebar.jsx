@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { Plus, Search, MessageSquare, Settings, Loader2, Zap, Clock, Hash } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { Plus, Search, MessageSquare, Settings, Loader2, Zap, MoreHorizontal, Pencil, Trash2, X, Check, Database } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import './ConversationSidebar.css';
 
@@ -7,6 +7,12 @@ export default function ConversationSidebar({ onNewChat, onResumeSession, onOpen
   const [loading, setLoading] = useState(true);
   const [sessions, setSessions] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
+  const [stats, setStats] = useState(null);
+  const [menuOpen, setMenuOpen] = useState(null); // session id with open menu
+  const [renaming, setRenaming] = useState(null); // session id being renamed
+  const [renameValue, setRenameValue] = useState('');
+  const [actionLoading, setActionLoading] = useState(null); // session id with loading action
+  const renameRef = useRef(null);
 
   const fetchSessions = async () => {
     setLoading(true);
@@ -21,7 +27,97 @@ export default function ConversationSidebar({ onNewChat, onResumeSession, onOpen
     }
   };
 
-  useEffect(() => { fetchSessions(); }, [refreshTrigger]);
+  const fetchStats = async () => {
+    try {
+      const resp = await fetch('/api/sessions/stats');
+      const data = await resp.json();
+      setStats(data);
+    } catch {
+      // fail silently
+    }
+  };
+
+  useEffect(() => {
+    fetchSessions();
+    fetchStats();
+  }, [refreshTrigger]);
+
+  // Close menu when clicking outside
+  useEffect(() => {
+    const handleClick = () => setMenuOpen(null);
+    if (menuOpen) document.addEventListener('click', handleClick);
+    return () => document.removeEventListener('click', handleClick);
+  }, [menuOpen]);
+
+  // Auto-focus rename input
+  useEffect(() => {
+    if (renaming && renameRef.current) {
+      renameRef.current.focus();
+      renameRef.current.select();
+    }
+  }, [renaming]);
+
+  const handleDelete = async (sessionId) => {
+    setActionLoading(sessionId);
+    setMenuOpen(null);
+    try {
+      const resp = await fetch('/api/sessions/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+      const data = await resp.json();
+      if (data.status === 'success') {
+        setSessions(prev => prev.filter(s => s.id !== sessionId));
+        fetchStats();
+      }
+    } catch {
+      // fail silently
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleRenameStart = (session) => {
+    setMenuOpen(null);
+    setRenaming(session.id);
+    setRenameValue(session.title || '');
+  };
+
+  const handleRenameSubmit = async (sessionId) => {
+    if (!renameValue.trim()) {
+      setRenaming(null);
+      return;
+    }
+    setActionLoading(sessionId);
+    try {
+      const resp = await fetch('/api/sessions/rename', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId, title: renameValue.trim() }),
+      });
+      const data = await resp.json();
+      if (data.status === 'success') {
+        setSessions(prev =>
+          prev.map(s => s.id === sessionId ? { ...s, title: renameValue.trim() } : s)
+        );
+      }
+    } catch {
+      // fail silently
+    } finally {
+      setRenaming(null);
+      setActionLoading(null);
+    }
+  };
+
+  const handleRenameKeyDown = (e, sessionId) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      handleRenameSubmit(sessionId);
+    } else if (e.key === 'Escape') {
+      setRenaming(null);
+    }
+  };
 
   // Group sessions by date
   const groupSessions = (sessions) => {
@@ -111,29 +207,76 @@ export default function ConversationSidebar({ onNewChat, onResumeSession, onOpen
                 {items.map((session, idx) => (
                   <motion.div
                     key={session.id || idx}
-                    className={`session-item ${activeSessionId === session.id ? 'active' : ''}`}
-                    onClick={() => onResumeSession && onResumeSession(session.id)}
+                    className={`session-item ${activeSessionId === session.id ? 'active' : ''} ${actionLoading === session.id ? 'loading' : ''}`}
+                    onClick={() => !renaming && onResumeSession && onResumeSession(session.id)}
                     initial={{ opacity: 0, x: -8 }}
                     animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -8, height: 0, marginBottom: 0, padding: 0 }}
                     transition={{ delay: idx * 0.03 }}
                   >
                     <div className="session-item-icon">
                       <MessageSquare size={14} />
                     </div>
                     <div className="session-item-content">
-                      <div className="session-item-title">
-                        {session.title || 'Untitled Session'}
-                      </div>
-                      <div className="session-item-meta">
-                        {(session.relativeDate || session.date) && <span>{session.relativeDate || session.date}</span>}
-                        {session.messages && (
-                          <>
-                            <span className="meta-dot" />
-                            <span>{session.messages} msgs</span>
-                          </>
+                      {renaming === session.id ? (
+                        <div className="session-rename-row">
+                          <input
+                            ref={renameRef}
+                            type="text"
+                            className="session-rename-input"
+                            value={renameValue}
+                            onChange={(e) => setRenameValue(e.target.value)}
+                            onKeyDown={(e) => handleRenameKeyDown(e, session.id)}
+                            onBlur={() => handleRenameSubmit(session.id)}
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                          <button className="session-rename-confirm" onClick={(e) => { e.stopPropagation(); handleRenameSubmit(session.id); }}>
+                            <Check size={12} />
+                          </button>
+                          <button className="session-rename-cancel" onClick={(e) => { e.stopPropagation(); setRenaming(null); }}>
+                            <X size={12} />
+                          </button>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="session-item-title">
+                            {session.title || 'Untitled Session'}
+                          </div>
+                          <div className="session-item-meta">
+                            {(session.relativeDate || session.date) && <span>{session.relativeDate || session.date}</span>}
+                            {session.messages && (
+                              <>
+                                <span className="meta-dot" />
+                                <span>{session.messages} msgs</span>
+                              </>
+                            )}
+                          </div>
+                        </>
+                      )}
+                    </div>
+
+                    {/* Action menu */}
+                    {!renaming && (
+                      <div className="session-actions" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          className="session-action-btn"
+                          onClick={(e) => { e.stopPropagation(); setMenuOpen(menuOpen === session.id ? null : session.id); }}
+                        >
+                          <MoreHorizontal size={14} />
+                        </button>
+
+                        {menuOpen === session.id && (
+                          <div className="session-context-menu">
+                            <button className="context-menu-item" onClick={() => handleRenameStart(session)}>
+                              <Pencil size={12} /> Rename
+                            </button>
+                            <button className="context-menu-item danger" onClick={() => handleDelete(session.id)}>
+                              <Trash2 size={12} /> Delete
+                            </button>
+                          </div>
                         )}
                       </div>
-                    </div>
+                    )}
                   </motion.div>
                 ))}
               </div>
@@ -142,8 +285,22 @@ export default function ConversationSidebar({ onNewChat, onResumeSession, onOpen
         )}
       </div>
 
-      {/* Footer — Settings */}
+      {/* Footer — Stats + Settings */}
       <div className="sidebar-footer">
+        {stats && stats.total_sessions != null && (
+          <div className="sidebar-stats">
+            <Database size={12} />
+            <span>{stats.total_sessions} sessions</span>
+            <span className="stats-dot">·</span>
+            <span>{stats.total_messages || 0} msgs</span>
+            {stats.db_size && (
+              <>
+                <span className="stats-dot">·</span>
+                <span>{stats.db_size}</span>
+              </>
+            )}
+          </div>
+        )}
         <button className="sidebar-footer-btn" onClick={onOpenSettings}>
           <Settings size={16} />
           Settings

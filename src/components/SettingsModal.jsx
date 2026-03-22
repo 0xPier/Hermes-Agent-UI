@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
-import { Settings, Save, Loader2, CheckCircle, XCircle, AlertTriangle, RefreshCw, X, Info, Volume2, Mic, VolumeX, MicOff, Cpu } from 'lucide-react';
+import { Settings, Save, Loader2, CheckCircle, XCircle, AlertTriangle, RefreshCw, X, Info, Volume2, Mic, VolumeX, MicOff, Cpu, Wrench, BookOpen } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import ToolManager from './ToolManager';
+import SkillsBrowser from './SkillsBrowser';
 import './SettingsModal.css';
 
 const PROVIDERS = [
@@ -295,6 +297,12 @@ export default function SettingsModal({ isOpen, onClose, onConfigChange }) {
             </button>
             <button className={`settings-tab ${activeTab === 'context' ? 'active' : ''}`} onClick={() => setActiveTab('context')}>
               Context
+            </button>
+            <button className={`settings-tab ${activeTab === 'tools' ? 'active' : ''}`} onClick={() => setActiveTab('tools')}>
+              Tools
+            </button>
+            <button className={`settings-tab ${activeTab === 'skills' ? 'active' : ''}`} onClick={() => setActiveTab('skills')}>
+              Skills
             </button>
             <button className={`settings-tab ${activeTab === 'system' ? 'active' : ''}`} onClick={() => setActiveTab('system')}>
               System
@@ -611,6 +619,18 @@ export default function SettingsModal({ isOpen, onClose, onConfigChange }) {
                       {saving ? <><Loader2 size={16} className="spinner" /> Saving...</> : <><Save size={16} /> Save Context Settings</>}
                     </button>
                   </motion.div>
+                )}
+
+                {activeTab === 'tools' && (
+                  <div className="settings-section">
+                    <ToolManager />
+                  </div>
+                )}
+
+                {activeTab === 'skills' && (
+                  <div className="settings-section">
+                    <SkillsBrowser />
+                  </div>
                 )}
 
                 {activeTab === 'system' && (

@@ -442,6 +442,259 @@ async def list_sessions():
 
 
 # ---------------------------------------------------------------------------
+# Tools management endpoints
+# ---------------------------------------------------------------------------
+
+TOOL_LINE_PATTERN = re.compile(
+    r'^\s*(✓|✗)\s+(enabled|disabled)\s+(\S+)\s+(.+)$'
+)
+
+
+@app.get("/api/tools")
+async def list_tools():
+    """Parse `hermes tools list` and return structured tool data."""
+    hermes_cmd = get_hermes_cmd()
+    tools = []
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            hermes_cmd, "tools", "list",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=os.environ.copy(),
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+        raw = strip_ansi(stdout.decode())
+
+        for line in raw.splitlines():
+            match = TOOL_LINE_PATTERN.match(line)
+            if match:
+                enabled = match.group(1) == "✓"
+                name = match.group(3)
+                description = match.group(4).strip()
+                # Split emoji from description
+                emoji = ""
+                desc_text = description
+                if description and not description[0].isascii():
+                    parts = description.split(" ", 1)
+                    if len(parts) == 2:
+                        emoji = parts[0]
+                        desc_text = parts[1]
+                    else:
+                        emoji = parts[0]
+                        desc_text = ""
+
+                tools.append({
+                    "name": name,
+                    "enabled": enabled,
+                    "emoji": emoji,
+                    "description": desc_text,
+                })
+    except Exception:
+        pass
+
+    return {"tools": tools}
+
+
+class ToolToggle(BaseModel):
+    name: str
+
+
+@app.post("/api/tools/enable")
+async def enable_tool(body: ToolToggle):
+    """Enable a toolset via `hermes tools enable <name>`."""
+    hermes_cmd = get_hermes_cmd()
+    tool_name = body.name.strip()
+    if not tool_name:
+        return {"status": "error", "message": "Tool name cannot be empty."}
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            hermes_cmd, "tools", "enable", tool_name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=os.environ.copy(),
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        if proc.returncode != 0:
+            err = strip_ansi(stderr.decode().strip() or stdout.decode().strip())
+            return {"status": "error", "message": f"Failed to enable {tool_name}: {err}"}
+        return {"status": "success", "tool": tool_name, "enabled": True}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/tools/disable")
+async def disable_tool(body: ToolToggle):
+    """Disable a toolset via `hermes tools disable <name>`."""
+    hermes_cmd = get_hermes_cmd()
+    tool_name = body.name.strip()
+    if not tool_name:
+        return {"status": "error", "message": "Tool name cannot be empty."}
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            hermes_cmd, "tools", "disable", tool_name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=os.environ.copy(),
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        if proc.returncode != 0:
+            err = strip_ansi(stderr.decode().strip() or stdout.decode().strip())
+            return {"status": "error", "message": f"Failed to disable {tool_name}: {err}"}
+        return {"status": "success", "tool": tool_name, "enabled": False}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Skills management endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/skills")
+async def list_skills():
+    """Parse `hermes skills list` and return structured skill data."""
+    hermes_cmd = get_hermes_cmd()
+    skills = []
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            hermes_cmd, "skills", "list",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=os.environ.copy(),
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15)
+        raw = strip_ansi(stdout.decode())
+
+        # Parse table rows: │ name │ category │ source │ origin │
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line.startswith("│"):
+                continue
+            cols = [c.strip() for c in line.split("│") if c.strip()]
+            if len(cols) >= 3:
+                name = cols[0]
+                # Skip header row
+                if name.lower() in ("name", "skill"):
+                    continue
+                # Skip separator rows
+                if all(c in "─┼" for c in name):
+                    continue
+                skills.append({
+                    "name": name,
+                    "category": cols[1] if len(cols) > 1 else "",
+                    "source": cols[2] if len(cols) > 2 else "",
+                    "origin": cols[3] if len(cols) > 3 else "",
+                })
+    except Exception:
+        pass
+
+    return {"skills": skills}
+
+
+# ---------------------------------------------------------------------------
+# Session management endpoints (delete, rename, stats)
+# ---------------------------------------------------------------------------
+
+class SessionDelete(BaseModel):
+    session_id: str
+
+
+class SessionRename(BaseModel):
+    session_id: str
+    title: str
+
+
+@app.post("/api/sessions/delete")
+async def delete_session(body: SessionDelete):
+    """Delete a session via `hermes sessions delete <id>`."""
+    hermes_cmd = get_hermes_cmd()
+    sid = body.session_id.strip()
+    if not sid:
+        return {"status": "error", "message": "Session ID cannot be empty."}
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            hermes_cmd, "sessions", "delete", sid,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.PIPE,
+            env=os.environ.copy(),
+        )
+        # Auto-confirm if prompted
+        stdout, stderr = await asyncio.wait_for(proc.communicate(input=b"y\n"), timeout=10)
+        if proc.returncode != 0:
+            err = strip_ansi(stderr.decode().strip() or stdout.decode().strip())
+            return {"status": "error", "message": f"Failed to delete session: {err}"}
+        return {"status": "success", "session_id": sid}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/api/sessions/rename")
+async def rename_session(body: SessionRename):
+    """Rename a session via `hermes sessions rename <id> <title>`."""
+    hermes_cmd = get_hermes_cmd()
+    sid = body.session_id.strip()
+    title = body.title.strip()
+    if not sid or not title:
+        return {"status": "error", "message": "Session ID and title cannot be empty."}
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            hermes_cmd, "sessions", "rename", sid, title,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=os.environ.copy(),
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        if proc.returncode != 0:
+            err = strip_ansi(stderr.decode().strip() or stdout.decode().strip())
+            return {"status": "error", "message": f"Failed to rename session: {err}"}
+        return {"status": "success", "session_id": sid, "title": title}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/sessions/stats")
+async def session_stats():
+    """Parse `hermes sessions stats` and return structured stats."""
+    hermes_cmd = get_hermes_cmd()
+    stats = {}
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            hermes_cmd, "sessions", "stats",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=os.environ.copy(),
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        raw = strip_ansi(stdout.decode())
+
+        for line in raw.splitlines():
+            line = line.strip()
+            if line.startswith("Total sessions:"):
+                try:
+                    stats["total_sessions"] = int(line.split(":")[1].strip())
+                except (ValueError, IndexError):
+                    pass
+            elif line.startswith("Total messages:"):
+                try:
+                    stats["total_messages"] = int(line.split(":")[1].strip())
+                except (ValueError, IndexError):
+                    pass
+            elif line.startswith("Database size:"):
+                stats["db_size"] = line.split(":")[1].strip()
+    except Exception:
+        pass
+
+    return stats
+
+
+# ---------------------------------------------------------------------------
 # Status endpoint
 # ---------------------------------------------------------------------------
 
