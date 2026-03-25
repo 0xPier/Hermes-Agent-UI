@@ -22,7 +22,9 @@ RUN apt-get update && apt-get install -y \
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir hermes-agent
+    git clone --recurse-submodules https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent && \
+    pip install --no-cache-dir /tmp/hermes-agent && \
+    rm -rf /tmp/hermes-agent
 
 # Copy built frontend from build-stage to /app/dist
 COPY --from=build-stage /app/dist /app/dist
