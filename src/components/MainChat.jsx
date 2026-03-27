@@ -1,35 +1,30 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Send, Zap, Activity, Cpu, User, WifiOff, PanelRightOpen, PanelRightClose, Loader2 } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { Send, Zap, User, Paperclip, Loader2 } from 'lucide-react';
+import { motion } from 'framer-motion';
 import ConversationSidebar from './ConversationSidebar';
-import AgentActivityPanel from './AgentActivityPanel';
-import SettingsModal from './SettingsModal';
 import ErrorCard from './ErrorCard';
 import ReactMarkdown from 'react-markdown';
+import ArcaLogo from './ArcaLogo';
 import './MainChat.css';
 
 const SUGGESTIONS = [
-  'Analyze this codebase and suggest improvements',
-  'Write a Python script to automate backups',
-  'Search the web for the latest AI research',
-  'Help me debug this error message',
+  'Riassumi un documento',
+  'Bozza una comunicazione',
+  'Rispondi a una domanda',
 ];
 
-export default function MainChat({ initialConfig }) {
+export default function MainChat() {
   const [inputVal, setInputVal] = useState('');
   const [messages, setMessages] = useState([]);
   const [ws, setWs] = useState(null);
   const [connState, setConnState] = useState('connecting');
   const [isThinking, setIsThinking] = useState(false);
-  const [activeModel, setActiveModel] = useState(initialConfig?.model || '');
-  const [activeProvider, setActiveProvider] = useState(initialConfig?.provider || 'auto');
   const [resumeSessionId, setResumeSessionId] = useState(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [activityCollapsed, setActivityCollapsed] = useState(false);
-  const [toolEvents, setToolEvents] = useState([]);
   const [sidebarRefresh, setSidebarRefresh] = useState(0);
+  const [uploading, setUploading] = useState(false);
 
   const messagesEndRef = useRef(null);
+  const fileInputRef = useRef(null);
   const wsRef = useRef(null);
   const reconnectTimer = useRef(null);
   const activeRuns = useRef(new Set());
@@ -39,15 +34,13 @@ export default function MainChat({ initialConfig }) {
   // ── WebSocket Connection ──
   const connectWebSocket = useCallback(() => {
     if (!isMounted.current) return;
-    if (wsRef.current && wsRef.current.readyState < 2) {
-      // Already open or connecting — skip
-      return;
-    }
+    if (wsRef.current && wsRef.current.readyState < 2) return;
     if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
 
     setConnState('connecting');
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    // Use relative path for Docker compatibility
     const socket = new WebSocket(`${protocol}//${window.location.host}/ws/chat`);
 
     socket.onopen = () => {
@@ -63,46 +56,11 @@ export default function MainChat({ initialConfig }) {
         activeRuns.current.add(data.runId);
         setIsThinking(true);
       } else if (data.type === 'agent_event') {
-        const time = new Date().toLocaleTimeString();
-        const isResult = data.event === 'tool_result';
-        const eventText = isResult
-          ? `${data.tool}: ${data.result || data.params}`
-          : `${data.tool}: ${data.params || 'executing'}`;
-
-        // Add to activity timeline
-        setToolEvents(prev => [...prev, {
-          type: isResult ? 'tool-result' : 'tool-call',
-          text: eventText,
-          time,
-          rawData: data, // Store raw data for detailed view
-          tool: data.tool,
-          params: data.params,
-          result: data.result,
-        }]);
-
-        // Inline tool display in chat
-        setMessages(prev => {
-          const runMsgIdx = prev.findIndex(m => m.runId === data.runId && m.role === 'assistant');
-          let toolDisplay = isResult
-            ? `Tool [${data.tool}] → ${data.result || data.params || 'completed'}`
-            : `⚡ ${data.tool} ${data.params ? `(${data.params})` : ''}`;
-          let toolType = isResult ? 'result' : 'call';
-
-          let newMsgs = [...prev];
-          if (runMsgIdx !== -1) {
-            newMsgs[runMsgIdx] = {
-              ...newMsgs[runMsgIdx],
-              tools: [...(newMsgs[runMsgIdx].tools || []), { text: toolDisplay, type: toolType }],
-            };
-          } else {
-            newMsgs.push({ role: 'assistant', runId: data.runId, content: '', tools: [{ text: toolDisplay, type: toolType }] });
-          }
-          return newMsgs;
-        });
+        // Suppress developer-focused tool events for Arca to keep UI clean
       } else if (data.type === 'stream_start') {
         setMessages(prev => {
           if (!prev.find(m => m.runId === data.runId)) {
-            return [...prev, { role: 'assistant', runId: data.runId, content: '', tools: [] }];
+            return [...prev, { role: 'assistant', runId: data.runId, content: '' }];
           }
           return prev;
         });
@@ -121,25 +79,17 @@ export default function MainChat({ initialConfig }) {
           return prev;
         });
       } else if (data.type === 'session_info') {
-        // Backend captured the session ID from hermes output — store it
-        // so subsequent messages in this chat window resume the same session
         setResumeSessionId(data.sessionId);
       } else if (data.type === 'stream_end') {
         activeRuns.current.delete(data.runId);
         if (activeRuns.current.size === 0) setIsThinking(false);
-        // Refresh sidebar to show newly created/updated session
         setSidebarRefresh(prev => prev + 1);
       } else if (data.type === 'error') {
         setIsThinking(false);
         activeRuns.current.delete(data.runId);
-        setToolEvents(prev => [...prev, {
-          type: 'error',
-          text: data.message,
-          time: new Date().toLocaleTimeString(),
-        }]);
         setMessages(prev => [
           ...prev,
-          { role: 'assistant', content: `Error: ${data.message}`, isSystem: true, isError: true },
+          { role: 'assistant', content: `Si è verificato un errore. Riprova.`, isSystem: true, isError: true },
         ]);
       }
     };
@@ -147,7 +97,6 @@ export default function MainChat({ initialConfig }) {
     socket.onclose = () => {
       setConnState('disconnected');
       setIsThinking(false);
-      // Only reconnect if still mounted, with increasing delay
       if (isMounted.current) {
         reconnectTimer.current = setTimeout(() => connectWebSocket(), 5000);
       }
@@ -168,19 +117,17 @@ export default function MainChat({ initialConfig }) {
       isMounted.current = false;
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       if (wsRef.current) {
-        wsRef.current.onclose = null; // prevent reconnect on cleanup
+        wsRef.current.onclose = null;
         wsRef.current.close();
       }
     };
   }, [connectWebSocket]);
 
-  // ── Auto-scroll ──
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
   useEffect(scrollToBottom, [messages, isThinking]);
 
-  // ── Auto-resize textarea ──
   const adjustTextarea = () => {
     const el = textareaRef.current;
     if (el) {
@@ -189,7 +136,6 @@ export default function MainChat({ initialConfig }) {
     }
   };
 
-  // ── Send ──
   const handleSend = (e) => {
     e?.preventDefault();
     if (!inputVal.trim() || !ws || connState !== 'connected') return;
@@ -214,42 +160,54 @@ export default function MainChat({ initialConfig }) {
     }
   };
 
-  // ── Handlers ──
+  const handleFileUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    
+    setUploading(true);
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const resp = await fetch('/api/ingest', {
+        method: 'POST',
+        body: formData,
+      });
+      if (resp.ok) {
+        setMessages(prev => [
+          ...prev,
+          { role: 'assistant', content: `Documento **${file.name}** caricato ed analizzato con successo.`, isSystem: true }
+        ]);
+      } else {
+        throw new Error("Upload failed");
+      }
+    } catch (err) {
+      setMessages(prev => [
+        ...prev,
+        { role: 'assistant', content: `Si è verificato un errore durante il caricamento di ${file.name}. Riprova.`, isSystem: true, isError: true }
+      ]);
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
   const handleResumeSession = (sessionId) => {
     setResumeSessionId(sessionId);
     setMessages(prev => [
       ...prev,
-      { role: 'assistant', content: `Resuming session ${sessionId.slice(0, 8)}... Send a message to continue.`, isSystem: true },
+      { role: 'assistant', content: `Ripresa conversazione...`, isSystem: true },
     ]);
   };
 
   const handleNewChat = () => {
     setResumeSessionId(null);
     setMessages([]);
-    setToolEvents([]);
-  };
-
-  const handleConfigChange = ({ model, provider }) => {
-    setActiveModel(model);
-    setActiveProvider(provider);
   };
 
   const handleSuggestionClick = (text) => {
     setInputVal(text);
     textareaRef.current?.focus();
-  };
-
-  const connColor = {
-    connecting: 'var(--warning)',
-    connected: 'var(--success)',
-    disconnected: 'var(--error)',
-    error: 'var(--error)',
-  };
-  const connClass = {
-    connecting: 'connecting',
-    connected: 'online',
-    disconnected: 'offline',
-    error: 'offline',
   };
 
   const hasMessages = messages.length > 0;
@@ -260,62 +218,24 @@ export default function MainChat({ initialConfig }) {
       <ConversationSidebar
         onNewChat={handleNewChat}
         onResumeSession={handleResumeSession}
-        onOpenSettings={() => setSettingsOpen(true)}
         activeSessionId={resumeSessionId}
         refreshTrigger={sidebarRefresh}
+        connState={connState}
       />
 
       {/* Center — Chat Panel */}
-      <main className="chat-main">
-        {/* Top Bar */}
-        <header className="chat-topbar">
-          <div className="topbar-left">
-            <div className="agent-status">
-              <div className={`status-dot ${connClass[connState]}`} />
-              <span className="agent-status-label">Arca</span>
-              <span className="conn-label" style={{ color: connColor[connState] }}>
-                {connState === 'connected' ? 'Online' : connState === 'connecting' ? 'Connecting...' : 'Offline'}
-              </span>
-            </div>
-            {activeModel && (
-              <div className="model-badge">
-                <Cpu size={12} />
-                <span>{activeModel}</span>
-                {activeProvider && activeProvider !== 'auto' && (
-                  <span className="provider-tag">{activeProvider}</span>
-                )}
-              </div>
-            )}
-          </div>
-          <div className="topbar-actions">
-            {connState === 'disconnected' && (
-              <button className="icon-btn" onClick={connectWebSocket} title="Reconnect">
-                <WifiOff size={16} />
-              </button>
-            )}
-            <button
-              className="icon-btn"
-              onClick={() => setActivityCollapsed(!activityCollapsed)}
-              title={activityCollapsed ? 'Show activity panel' : 'Hide activity panel'}
-            >
-              {activityCollapsed ? <PanelRightOpen size={16} /> : <PanelRightClose size={16} />}
-            </button>
-          </div>
-        </header>
-
+      <main className="chat-main arca-main">
         {/* Messages / Empty State */}
         {!hasMessages ? (
           <div className="chat-empty-state">
-            <div className="empty-state-icon">
-              <Zap size={28} color="var(--accent-primary)" />
+            <div className="empty-state-icon arca-logo-container">
+              <ArcaLogo size={60} />
             </div>
-            <h1 className="empty-state-title heading-gradient">
-              What would you like Arca to do?
-            </h1>
-            <p className="empty-state-subtitle">
-              Arca is an autonomous AI agent that can browse the web, write code, manage files, and execute tasks.
+            <h1 className="empty-state-title" style={{ marginTop: '20px', fontFamily: 'var(--font-serif)', color: 'var(--accent-primary)' }}>Arca</h1>
+            <p className="empty-state-subtitle" style={{ fontSize: '1.1rem', color: 'var(--text-secondary)' }}>
+              Il tuo ufficio. La tua intelligenza. Nessun cloud.
             </p>
-            <div className="suggestion-chips">
+            <div className="suggestion-chips" style={{ marginTop: '30px' }}>
               {SUGGESTIONS.map((s, i) => (
                 <button key={i} className="suggestion-chip" onClick={() => handleSuggestionClick(s)}>
                   {s}
@@ -339,7 +259,7 @@ export default function MainChat({ initialConfig }) {
                       <ErrorCard message={msg.content} />
                     ) : (
                       <div className="message-bubble system">
-                        {msg.content}
+                        <ReactMarkdown>{msg.content}</ReactMarkdown>
                       </div>
                     )}
                   </motion.div>
@@ -353,33 +273,13 @@ export default function MainChat({ initialConfig }) {
                   initial={{ opacity: 0, y: 8 }}
                   animate={{ opacity: 1, y: 0 }}
                 >
-                  {msg.role === 'assistant' && (
-                    <div className="message-avatar agent">
-                      <Zap size={14} />
-                    </div>
-                  )}
                   <div className={`message-bubble ${msg.role}`}>
-                    {/* Tool cards */}
-                    {msg.tools && msg.tools.length > 0 && (
-                      <div className="tool-cards">
-                        {msg.tools.map((t, i) => (
-                          <div key={i} className={`tool-event-card ${t.type === 'result' ? 'result' : ''}`}>
-                            {t.text || t}
-                          </div>
-                        ))}
-                      </div>
-                    )}
                     <div className="message-content">
                       {msg.role === 'assistant'
                         ? <ReactMarkdown>{msg.content}</ReactMarkdown>
                         : msg.content}
                     </div>
                   </div>
-                  {msg.role === 'user' && (
-                    <div className="message-avatar user-avatar">
-                      <User size={14} />
-                    </div>
-                  )}
                 </motion.div>
               );
             })}
@@ -391,16 +291,9 @@ export default function MainChat({ initialConfig }) {
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
               >
-                <div className="message-avatar agent">
-                  <Zap size={14} />
-                </div>
                 <div className="thinking-bubble">
-                  <div className="thinking-dots">
-                    <span className="thinking-dot" />
-                    <span className="thinking-dot" />
-                    <span className="thinking-dot" />
-                  </div>
-                  <span className="thinking-text">Thinking...</span>
+                  <Loader2 size={16} className="spinner" style={{ marginRight: '8px', color: 'var(--accent-primary)' }}/>
+                  <span className="thinking-text" style={{ fontStyle: 'italic', color: 'var(--text-muted)' }}>Arca sta elaborando...</span>
                 </div>
               </motion.div>
             )}
@@ -411,11 +304,30 @@ export default function MainChat({ initialConfig }) {
 
         {/* Input Area */}
         <div className="chat-input-area">
-          <form className="input-container" onSubmit={handleSend}>
+          <div className="active-agent-bar">
+            Agente: Assistente documenti
+          </div>
+          <form className="input-container arca-input" onSubmit={handleSend}>
+            <input
+              type="file"
+              ref={fileInputRef}
+              style={{ display: 'none' }}
+              onChange={handleFileUpload}
+              accept=".pdf,.docx"
+            />
+            <button
+              type="button"
+              className="icon-btn attach-btn"
+              onClick={() => fileInputRef.current?.click()}
+              title="Carica documento"
+              disabled={connState !== 'connected' || uploading}
+            >
+              {uploading ? <Loader2 size={18} className="spinner" /> : <Paperclip size={18} />}
+            </button>
             <textarea
               ref={textareaRef}
               className="chat-textarea"
-              placeholder={connState === 'connected' ? 'Tell Arca what to do...' : 'Waiting for connection...'}
+              placeholder={connState === 'connected' ? 'Scrivi un messaggio o carica un documento...' : 'Connessione in corso...'}
               value={inputVal}
               onChange={(e) => {
                 setInputVal(e.target.value);
@@ -428,6 +340,7 @@ export default function MainChat({ initialConfig }) {
             <button
               type="submit"
               className="send-btn"
+              style={{ background: 'var(--accent-primary)', color: '#0F1C2E' }}
               disabled={!inputVal.trim() || connState !== 'connected' || isThinking}
             >
               <Send size={16} />
@@ -435,23 +348,6 @@ export default function MainChat({ initialConfig }) {
           </form>
         </div>
       </main>
-
-      {/* Right Rail — Agent Activity */}
-      <AgentActivityPanel
-        collapsed={activityCollapsed}
-        onToggle={() => setActivityCollapsed(!activityCollapsed)}
-        connState={connState}
-        activeModel={activeModel}
-        activeProvider={activeProvider}
-        toolEvents={toolEvents}
-      />
-
-      {/* Settings Modal */}
-      <SettingsModal
-        isOpen={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        onConfigChange={handleConfigChange}
-      />
     </div>
   );
 }

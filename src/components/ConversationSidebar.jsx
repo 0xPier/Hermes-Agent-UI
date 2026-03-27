@@ -1,17 +1,17 @@
 import { useState, useEffect, useRef } from 'react';
-import { Plus, Search, MessageSquare, Settings, Loader2, Zap, MoreHorizontal, Pencil, Trash2, X, Check, Database } from 'lucide-react';
+import { Plus, Search, MessageSquare, Loader2, MoreHorizontal, Pencil, Trash2, X, Check, Database, Lock } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import ArcaLogo from './ArcaLogo';
 import './ConversationSidebar.css';
 
-export default function ConversationSidebar({ onNewChat, onResumeSession, onOpenSettings, activeSessionId, refreshTrigger }) {
+export default function ConversationSidebar({ onNewChat, onResumeSession, activeSessionId, refreshTrigger, connState }) {
   const [loading, setLoading] = useState(true);
   const [sessions, setSessions] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
-  const [stats, setStats] = useState(null);
-  const [menuOpen, setMenuOpen] = useState(null); // session id with open menu
-  const [renaming, setRenaming] = useState(null); // session id being renamed
+  const [menuOpen, setMenuOpen] = useState(null);
+  const [renaming, setRenaming] = useState(null);
   const [renameValue, setRenameValue] = useState('');
-  const [actionLoading, setActionLoading] = useState(null); // session id with loading action
+  const [actionLoading, setActionLoading] = useState(null);
   const renameRef = useRef(null);
 
   const fetchSessions = async () => {
@@ -27,29 +27,16 @@ export default function ConversationSidebar({ onNewChat, onResumeSession, onOpen
     }
   };
 
-  const fetchStats = async () => {
-    try {
-      const resp = await fetch('/api/sessions/stats');
-      const data = await resp.json();
-      setStats(data);
-    } catch {
-      // fail silently
-    }
-  };
-
   useEffect(() => {
     fetchSessions();
-    fetchStats();
   }, [refreshTrigger]);
 
-  // Close menu when clicking outside
   useEffect(() => {
     const handleClick = () => setMenuOpen(null);
     if (menuOpen) document.addEventListener('click', handleClick);
     return () => document.removeEventListener('click', handleClick);
   }, [menuOpen]);
 
-  // Auto-focus rename input
   useEffect(() => {
     if (renaming && renameRef.current) {
       renameRef.current.focus();
@@ -69,10 +56,8 @@ export default function ConversationSidebar({ onNewChat, onResumeSession, onOpen
       const data = await resp.json();
       if (data.status === 'success') {
         setSessions(prev => prev.filter(s => s.id !== sessionId));
-        fetchStats();
       }
     } catch {
-      // fail silently
     } finally {
       setActionLoading(null);
     }
@@ -103,7 +88,6 @@ export default function ConversationSidebar({ onNewChat, onResumeSession, onOpen
         );
       }
     } catch {
-      // fail silently
     } finally {
       setRenaming(null);
       setActionLoading(null);
@@ -119,28 +103,27 @@ export default function ConversationSidebar({ onNewChat, onResumeSession, onOpen
     }
   };
 
-  // Group sessions by date
   const groupSessions = (sessions) => {
     const now = new Date();
     const today = now.toDateString();
     const yesterday = new Date(now - 86400000).toDateString();
     const weekAgo = new Date(now - 7 * 86400000);
 
-    const groups = { 'Today': [], 'Yesterday': [], 'This Week': [], 'Older': [] };
+    const groups = { 'Oggi': [], 'Ieri': [], 'Questa settimana': [], 'Meno recenti': [] };
 
     sessions.forEach(s => {
       if (!s.date) {
-        groups['Older'].push(s);
+        groups['Meno recenti'].push(s);
         return;
       }
       try {
         const d = new Date(s.date);
-        if (d.toDateString() === today) groups['Today'].push(s);
-        else if (d.toDateString() === yesterday) groups['Yesterday'].push(s);
-        else if (d > weekAgo) groups['This Week'].push(s);
-        else groups['Older'].push(s);
+        if (d.toDateString() === today) groups['Oggi'].push(s);
+        else if (d.toDateString() === yesterday) groups['Ieri'].push(s);
+        else if (d > weekAgo) groups['Questa settimana'].push(s);
+        else groups['Meno recenti'].push(s);
       } catch {
-        groups['Older'].push(s);
+        groups['Meno recenti'].push(s);
       }
     });
 
@@ -161,14 +144,11 @@ export default function ConversationSidebar({ onNewChat, onResumeSession, onOpen
       {/* Brand + New Task */}
       <div className="sidebar-header">
         <div className="sidebar-brand">
-          <div className="brand-icon">
-            <Zap size={16} color="#fff" />
-          </div>
-          <span className="brand-name">Arca</span>
-          <span className="brand-tag">Assistant</span>
+          <ArcaLogo size={24} />
+          <span className="brand-name" style={{ fontFamily: 'var(--font-serif)', color: 'var(--accent-primary)', marginLeft: '8px', fontSize: '1.2rem' }}>Arca</span>
         </div>
-        <button className="new-task-btn" onClick={onNewChat}>
-          <Plus size={16} /> New Task
+        <button className="new-task-btn" onClick={onNewChat} style={{ background: 'var(--accent-primary)', color: '#0F1C2E', marginTop: '16px' }}>
+          <Plus size={16} /> Nuova conversazione
         </button>
       </div>
 
@@ -179,7 +159,7 @@ export default function ConversationSidebar({ onNewChat, onResumeSession, onOpen
           <input
             type="text"
             className="search-input"
-            placeholder="Search conversations..."
+            placeholder="Cerca conversazione..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
           />
@@ -191,13 +171,13 @@ export default function ConversationSidebar({ onNewChat, onResumeSession, onOpen
         {loading ? (
           <div className="sessions-loading">
             <Loader2 size={20} className="spinner" />
-            <span>Loading sessions...</span>
+            <span>Caricamento...</span>
           </div>
         ) : filteredSessions.length === 0 ? (
           <div className="sessions-empty">
             <MessageSquare size={28} strokeWidth={1.5} />
-            <p>No conversations yet</p>
-            <span>Start a new task to begin</span>
+            <p>Nessuna conversazione</p>
+            <span>Inizia una nuova conversazione</span>
           </div>
         ) : (
           <AnimatePresence>
@@ -240,16 +220,10 @@ export default function ConversationSidebar({ onNewChat, onResumeSession, onOpen
                       ) : (
                         <>
                           <div className="session-item-title">
-                            {session.title || 'Untitled Session'}
+                            {session.title || 'Nuova conversazione'}
                           </div>
                           <div className="session-item-meta">
                             {(session.relativeDate || session.date) && <span>{session.relativeDate || session.date}</span>}
-                            {session.messages && (
-                              <>
-                                <span className="meta-dot" />
-                                <span>{session.messages} msgs</span>
-                              </>
-                            )}
                           </div>
                         </>
                       )}
@@ -268,10 +242,10 @@ export default function ConversationSidebar({ onNewChat, onResumeSession, onOpen
                         {menuOpen === session.id && (
                           <div className="session-context-menu">
                             <button className="context-menu-item" onClick={() => handleRenameStart(session)}>
-                              <Pencil size={12} /> Rename
+                              <Pencil size={12} /> Rinomina
                             </button>
                             <button className="context-menu-item danger" onClick={() => handleDelete(session.id)}>
-                              <Trash2 size={12} /> Delete
+                              <Trash2 size={12} /> Elimina
                             </button>
                           </div>
                         )}
@@ -285,26 +259,16 @@ export default function ConversationSidebar({ onNewChat, onResumeSession, onOpen
         )}
       </div>
 
-      {/* Footer — Stats + Settings */}
-      <div className="sidebar-footer">
-        {stats && stats.total_sessions != null && (
-          <div className="sidebar-stats">
-            <Database size={12} />
-            <span>{stats.total_sessions} sessions</span>
-            <span className="stats-dot">·</span>
-            <span>{stats.total_messages || 0} msgs</span>
-            {stats.db_size && (
-              <>
-                <span className="stats-dot">·</span>
-                <span>{stats.db_size}</span>
-              </>
-            )}
-          </div>
-        )}
-        <button className="sidebar-footer-btn" onClick={onOpenSettings}>
-          <Settings size={16} />
-          Settings
-        </button>
+      {/* Footer — Status indicators */}
+      <div className="sidebar-footer" style={{ borderTop: '1px solid var(--border-subtle)', padding: '16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+          <div className={`status-dot ${connState === 'connected' ? 'online' : connState === 'connecting' ? 'connecting' : 'offline'}`} />
+          Agente attivo — Assistente documenti
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+          <Lock size={12} />
+          Connesso in locale
+        </div>
       </div>
     </aside>
   );

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -692,6 +692,54 @@ async def session_stats():
         pass
 
     return stats
+
+
+# ---------------------------------------------------------------------------
+# Ingestion endpoint
+# ---------------------------------------------------------------------------
+
+@app.post("/api/ingest")
+async def ingest_file(file: UploadFile = File(...)):
+    """Accept an uploaded file and process it with `hermes ingest <file>`."""
+    if not file.filename:
+        return {"status": "error", "message": "No file uploaded."}
+    
+    hermes_cmd = get_hermes_cmd()
+    
+    # Save the file to a temporary location
+    temp_dir = Path("/tmp/arca_ingest")
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    
+    safe_name = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', file.filename)
+    file_path = temp_dir / safe_name
+    
+    try:
+        content = await file.read()
+        file_path.write_bytes(content)
+        
+        # Execute hermes ingest
+        proc = await asyncio.create_subprocess_exec(
+            hermes_cmd, "ingest", str(file_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=os.environ.copy()
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        
+        if proc.returncode != 0:
+            err = strip_ansi(stderr.decode().strip() or stdout.decode().strip())
+            return {"status": "error", "message": f"Ingestion failed: {err}"}
+            
+        return {"status": "success", "message": f"File {file.filename} ingested successfully"}
+        
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        if file_path.exists():
+            try:
+                file_path.unlink()
+            except:
+                pass
 
 
 # ---------------------------------------------------------------------------

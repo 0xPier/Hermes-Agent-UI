@@ -3,3 +3,4 @@ uvicorn[standard]
 websockets
 pydantic
 pyyaml
+python-multipart
