@@ -44,7 +44,7 @@ export default function SettingsModal({ isOpen, onClose, onConfigChange }) {
   const [activeTab, setActiveTab] = useState('model');
   const [keyInputs, setKeyInputs] = useState({});
 
-  // General settings — mapped to real Hermes config keys
+  // General settings — mapped to real backend config keys
   const [generalSettings, setGeneralSettings] = useState({
     max_turns: 60,
     personality: '',
@@ -157,7 +157,7 @@ export default function SettingsModal({ isOpen, onClose, onConfigChange }) {
     setSaveStatus(null);
 
     try {
-      // Build config updates using REAL Hermes config key paths
+      // Build config updates using REAL backend config key paths
       const configUpdates = {};
 
       // General settings → real keys

@@ -7,7 +7,7 @@ export default function ErrorCard({ message }) {
   let rawText = message;
 
   try {
-    // Basic extraction if it's the specific Hermes error format
+    // Basic extraction if it's the specific Arca error format
     if (message.includes('API call failed')) {
       const parts = message.split('Error:');
       if (parts.length > 1) {

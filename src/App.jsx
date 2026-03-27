@@ -69,7 +69,7 @@ function App() {
             animation: 'spin 0.8s linear infinite',
           }} />
           <span style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-            Detecting Hermes configuration...
+            Detecting Arca configuration...
           </span>
         </div>
       </div>

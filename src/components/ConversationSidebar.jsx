@@ -164,8 +164,8 @@ export default function ConversationSidebar({ onNewChat, onResumeSession, onOpen
           <div className="brand-icon">
             <Zap size={16} color="#fff" />
           </div>
-          <span className="brand-name">Hermes</span>
-          <span className="brand-tag">Agent</span>
+          <span className="brand-name">Arca</span>
+          <span className="brand-tag">Assistant</span>
         </div>
         <button className="new-task-btn" onClick={onNewChat}>
           <Plus size={16} /> New Task

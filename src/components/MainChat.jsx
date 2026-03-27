@@ -272,7 +272,7 @@ export default function MainChat({ initialConfig }) {
           <div className="topbar-left">
             <div className="agent-status">
               <div className={`status-dot ${connClass[connState]}`} />
-              <span className="agent-status-label">Hermes</span>
+              <span className="agent-status-label">Arca</span>
               <span className="conn-label" style={{ color: connColor[connState] }}>
                 {connState === 'connected' ? 'Online' : connState === 'connecting' ? 'Connecting...' : 'Offline'}
               </span>
@@ -310,10 +310,10 @@ export default function MainChat({ initialConfig }) {
               <Zap size={28} color="var(--accent-primary)" />
             </div>
             <h1 className="empty-state-title heading-gradient">
-              What would you like Hermes to do?
+              What would you like Arca to do?
             </h1>
             <p className="empty-state-subtitle">
-              Hermes is an autonomous AI agent that can browse the web, write code, manage files, and execute tasks.
+              Arca is an autonomous AI agent that can browse the web, write code, manage files, and execute tasks.
             </p>
             <div className="suggestion-chips">
               {SUGGESTIONS.map((s, i) => (
@@ -415,7 +415,7 @@ export default function MainChat({ initialConfig }) {
             <textarea
               ref={textareaRef}
               className="chat-textarea"
-              placeholder={connState === 'connected' ? 'Tell Hermes what to do...' : 'Waiting for connection...'}
+              placeholder={connState === 'connected' ? 'Tell Arca what to do...' : 'Waiting for connection...'}
               value={inputVal}
               onChange={(e) => {
                 setInputVal(e.target.value);

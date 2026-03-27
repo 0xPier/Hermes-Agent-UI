@@ -240,13 +240,13 @@ export default function GuidedInstallation({ onComplete }) {
                     <div style={{ background: 'rgba(34, 168, 204, 0.1)', padding: '12px', borderRadius: '12px' }}>
                       <Terminal color="var(--primary)" size={32} />
                     </div>
-                    <h2 className="step-title heading-gradient">Welcome to Hermes UI</h2>
+                    <h2 className="step-title heading-gradient">Welcome to Arca</h2>
                   </div>
                   <p className="step-description">
-                    A web interface for the <strong>Hermes Agent</strong> — the autonomous AI agent by Nous Research.
+                    A professional web interface for <strong>Arca</strong> — your secure AI assistant.
                   </p>
                   <p className="step-description" style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>
-                    This setup will verify your Hermes CLI installation and configure your model & provider.
+                    This setup will verify your backend installation and configure your model & provider.
                   </p>
                   <div style={{ marginTop: '2rem' }}>
                     <button className="btn-primary" onClick={handleVerify}>
@@ -290,7 +290,7 @@ export default function GuidedInstallation({ onComplete }) {
                     {healthData && !healthData.installed && (
                       <>
                         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="log-line log-error">
-                          <span><XCircle size={14} style={{ verticalAlign: 'middle', marginRight: '6px' }} />Hermes CLI not found in PATH</span>
+                          <span><XCircle size={14} style={{ verticalAlign: 'middle', marginRight: '6px' }} />Backend CLI not found in PATH</span>
                         </motion.div>
                         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="log-line log-warning" style={{ marginTop: '0.5rem' }}>
                           <span style={{ color: 'var(--warning)' }}>
@@ -308,7 +308,7 @@ export default function GuidedInstallation({ onComplete }) {
                     {healthData && healthData.installed && (
                       <>
                         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="log-line log-success">
-                          <span>✓ Hermes CLI found at {healthData.binary}</span>
+                          <span>✓ Backend CLI found at {healthData.binary}</span>
                         </motion.div>
                         {healthData.version && (
                           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="log-line log-success">
@@ -484,11 +484,11 @@ export default function GuidedInstallation({ onComplete }) {
                   >
                     <CheckCircle color="var(--success)" size={48} />
                   </motion.div>
-                  <h2 className="step-title heading-gradient">Hermes is Ready</h2>
+                  <h2 className="step-title heading-gradient">Arca is Ready</h2>
                   <p className="step-description">
                     {selectedModel
                       ? <>Using <strong>{selectedModel}</strong> via <strong>{selectedProvider}</strong> provider.</>
-                      : 'Hermes Agent is configured and ready for commands.'}
+                      : 'Arca is configured and ready for commands.'}
                   </p>
                   <div className="ready-config-summary">
                     <div className="config-summary-row">
