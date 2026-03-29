@@ -1108,32 +1108,35 @@ async def run_hermes_agent(
 
         # Track state
         captured_session_id = None
-        in_response_block = False  # Track when we're inside the actual response
-        response_started = False   # Track if we've seen actual response content
+        in_think_block = False   # True while inside <think>...</think>
+        in_assistant_block = False  # True once we've seen 🤖 Assistant:
 
-        # Stream stderr
+        # ── Disclaimer / boilerplate patterns to strip ──
+        # These are LLM self-referential phrases that add no value
+        DISCLAIMER_PATTERNS = [
+            re.compile(r"(please note|keep in mind|it('s| is) (important|worth noting)|i('m| am) an? (ai|artificial intelligence|language model|llm)|as an? (ai|llm|language model)|i should (mention|note|clarify|point out)|disclaimer:|note that i|remember that i)[^.!?\n]*[.!?]?", re.IGNORECASE),
+            re.compile(r"^(note:|please note:|disclaimer:)\s*", re.IGNORECASE),
+        ]
+
+        def strip_disclaimers(text: str) -> str:
+            """Remove AI self-referential boilerplate from a line of text."""
+            for pat in DISCLAIMER_PATTERNS:
+                text = pat.sub("", text)
+            return text.strip()
+
+        def is_pure_disclaimer(line: str) -> bool:
+            """Return True if the entire line is just LLM boilerplate."""
+            cleaned = strip_disclaimers(line.strip())
+            # If stripping leaves nothing or just punctuation, it was pure boilerplate
+            return len(cleaned) < 5
+
+        # Stream stderr — suppress from chat, only log internally
         async def stream_stderr():
             while True:
                 line = await process.stderr.readline()
                 if not line:
                     break
-                text = strip_ansi(line.decode("utf-8")).strip()
-                if text:
-                    if any(keyword in text.lower() for keyword in ['tool', 'executing', 'calling', 'result']):
-                        await manager.safe_send(json.dumps({
-                            "type": "agent_event",
-                            "event": "tool_call",
-                            "tool": "system",
-                            "result": text,
-                            "runId": run_id,
-                        }), websocket)
-                    
-                    await manager.safe_send(json.dumps({
-                        "type": "stream_chunk",
-                        "runId": run_id,
-                        "chunk": f"⚠ {text}\n",
-                        "isError": True,
-                    }), websocket)
+                # Intentionally not forwarding stderr to chat — it's system noise
 
         stderr_task = asyncio.create_task(stream_stderr())
 
@@ -1146,22 +1149,61 @@ async def run_hermes_agent(
             text = strip_ansi(line.decode("utf-8"))
             stripped = text.strip()
 
-            # ── 1. Capture session ID (appears at end of hermes output) ──
+            # ── 1. Capture session ID ──
             session_match = SESSION_ID_PATTERN.match(stripped)
             if session_match:
                 captured_session_id = session_match.group(1)
-                continue  # Don't send to user
-
-            # Also catch "Session:  20260321_132717_748a54" format
+                continue
             if stripped.startswith("Session:"):
                 parts = stripped.split(":", 1)
                 if len(parts) > 1 and parts[1].strip():
                     captured_session_id = parts[1].strip()
                 continue
 
-            # ── 2. Parse verbose tool/agent events for activity monitor ──
-            
-            # API call events
+            # ── 2. <think> block state machine ──
+            # Handle multi-line think blocks — qwen and similar models
+            if in_think_block:
+                if "</think>" in stripped:
+                    in_think_block = False
+                    # Emit anything after </think> on the same line
+                    after = stripped.split("</think>", 1)[1].strip()
+                    if after and not is_pure_disclaimer(after):
+                        after = strip_disclaimers(after)
+                        if after:
+                            ok = await manager.safe_send(json.dumps({
+                                "type": "stream_chunk",
+                                "runId": run_id,
+                                "chunk": after + "\n",
+                            }), websocket)
+                            if not ok:
+                                process.kill()
+                                return
+                continue  # Still inside think block, skip line
+
+            # Detect opening of think block (may be on a line with other content)
+            if "<think>" in stripped:
+                if "</think>" in stripped:
+                    # Entire think block on one line — skip it
+                    # But emit anything before/after
+                    before = stripped.split("<think>", 1)[0].strip()
+                    after_part = stripped.split("</think>", 1)[-1].strip() if "</think>" in stripped else ""
+                    for part in [before, after_part]:
+                        if part and not is_pure_disclaimer(part):
+                            part = strip_disclaimers(part)
+                            if part:
+                                ok = await manager.safe_send(json.dumps({
+                                    "type": "stream_chunk",
+                                    "runId": run_id,
+                                    "chunk": part + "\n",
+                                }), websocket)
+                                if not ok:
+                                    process.kill()
+                                    return
+                else:
+                    in_think_block = True
+                continue
+
+            # ── 3. Verbose tool/agent events (send as agent_event, never to chat) ──
             api_match = API_CALL_PATTERN.match(stripped)
             if api_match:
                 call_num = api_match.group(1) or "?"
@@ -1175,150 +1217,80 @@ async def run_hermes_agent(
                 }), websocket)
                 continue
 
-            # Request size info (📊 Request size: 2 messages, ~3,385 tokens)
             if stripped.startswith("📊") and "Request size:" in stripped:
-                await manager.safe_send(json.dumps({
-                    "type": "agent_event",
-                    "event": "tool_call",
-                    "tool": "Context",
-                    "params": stripped.lstrip("📊").strip(),
-                    "runId": run_id,
-                }), websocket)
-                continue
+                continue  # Noise
 
-            # API call timing (⏱️  API call completed in 36.20s)
             if stripped.startswith("⏱️") and "completed" in stripped:
-                await manager.safe_send(json.dumps({
-                    "type": "agent_event",
-                    "event": "tool_result",
-                    "tool": "API",
-                    "result": stripped.lstrip("⏱️").strip(),
-                    "runId": run_id,
-                }), websocket)
-                continue
+                continue  # Noise
 
-            # AI Agent initialized
             ai_match = AI_INIT_PATTERN.match(stripped)
             if ai_match:
-                await manager.safe_send(json.dumps({
-                    "type": "agent_event",
-                    "event": "tool_call",
-                    "tool": "Agent",
-                    "params": f"Initialized with {ai_match.group(1)}",
-                    "runId": run_id,
-                }), websocket)
-                continue
+                continue  # Noise
 
-            # Toolset enabled events
             toolset_match = TOOLSET_PATTERN.search(stripped)
             if toolset_match:
-                await manager.safe_send(json.dumps({
-                    "type": "agent_event",
-                    "event": "tool_call",
-                    "tool": toolset_match.group(1),
-                    "params": toolset_match.group(2)[:80],
-                    "runId": run_id,
-                }), websocket)
-                continue
+                continue  # Noise
 
-            # Tool execution / loaded events
             tool_exec_match = TOOL_EXEC_PATTERN.match(stripped)
             if tool_exec_match:
-                detail = tool_exec_match.group(1).strip()
-                if "Final tool selection" in detail or "Loaded" in detail:
-                    await manager.safe_send(json.dumps({
-                        "type": "agent_event",
-                        "event": "tool_result",
-                        "tool": "Tools",
-                        "result": detail[:100],
-                        "runId": run_id,
-                    }), websocket)
-                continue
+                continue  # Noise
 
-            # Conversation started
-            if stripped.startswith("💬"):
-                await manager.safe_send(json.dumps({
-                    "type": "agent_event",
-                    "event": "tool_call",
-                    "tool": "Chat",
-                    "params": stripped.lstrip("💬").strip(),
-                    "runId": run_id,
-                }), websocket)
-                continue
+            if stripped.startswith("💬") or stripped.startswith("🎉"):
+                continue  # Noise
 
-            # Conversation completed
-            if stripped.startswith("🎉"):
-                await manager.safe_send(json.dumps({
-                    "type": "agent_event",
-                    "event": "tool_result",
-                    "tool": "Chat",
-                    "result": stripped.lstrip("🎉").strip(),
-                    "runId": run_id,
-                }), websocket)
-                continue
-
-            # Thinking indicator
             thinking_match = THINKING_PATTERN.match(stripped)
             if thinking_match:
-                await manager.safe_send(json.dumps({
-                    "type": "agent_event",
-                    "event": "tool_call",
-                    "tool": "Thinking",
-                    "params": thinking_match.group(1)[:100],
-                    "runId": run_id,
-                }), websocket)
-                continue
+                continue  # Noise
 
-            # Context limit info
-            context_match = CONTEXT_PATTERN.match(stripped)
-            if context_match:
-                continue  # Skip — just noise
+            if CONTEXT_PATTERN.match(stripped):
+                continue  # Noise
 
-            # 🤖 Assistant response prefix — start of actual response content
+            # ── 4. 🤖 Assistant: marker — enter response mode ──
             if stripped.startswith("🤖 Assistant:"):
-                response_started = True
-                # Extract the content after "🤖 Assistant:"
+                in_assistant_block = True
                 content = stripped[len("🤖 Assistant:"):].strip()
-                # Skip <think> blocks
-                if content.startswith("<think>"):
-                    continue
-                if content:
-                    ok = await manager.safe_send(json.dumps({
-                        "type": "stream_chunk",
-                        "runId": run_id,
-                        "chunk": content + "\n",
-                    }), websocket)
-                    if not ok:
-                        process.kill()
-                        return
+                if content and not is_pure_disclaimer(content):
+                    content = strip_disclaimers(content)
+                    if content:
+                        ok = await manager.safe_send(json.dumps({
+                            "type": "stream_chunk",
+                            "runId": run_id,
+                            "chunk": content + "\n",
+                        }), websocket)
+                        if not ok:
+                            process.kill()
+                            return
                 continue
 
-            # Skip verbose-only info lines
+            # ── 5. Skip verbose/noise prefix lines ──
             if any(stripped.startswith(prefix) for prefix in [
                 "✅ Enabled", "⚠️", "🔗", "🔒", "🛡️",
             ]):
                 continue
-
-            # Skip query echo and separator lines
             if QUERY_LINE_PATTERN.match(stripped):
                 continue
             if stripped.startswith("────") or stripped.startswith("═══"):
                 continue
-
-            # Skip <think> blocks from models like qwen
-            if stripped.startswith("<think>") or stripped.startswith("</think>"):
-                continue
-
-            # Skip all banner/noise
             if is_noise(text):
                 continue
 
-            # ── 3. Send actual response text ──
-            # At this point, we've filtered out noise, verbose events, and metadata
+            # ── 6. Send response text ──
+            # Only forward lines once we're in the assistant response block
+            # to prevent pre-response CLI chrome from leaking through.
+            if not in_assistant_block:
+                continue
+
+            # Apply disclaimer filter
+            if is_pure_disclaimer(stripped):
+                continue
+            cleaned = strip_disclaimers(text.rstrip("\n"))
+            if not cleaned.strip():
+                continue
+
             ok = await manager.safe_send(json.dumps({
                 "type": "stream_chunk",
                 "runId": run_id,
-                "chunk": text,
+                "chunk": cleaned + "\n",
             }), websocket)
             if not ok:
                 process.kill()
