@@ -13,7 +13,7 @@ const SUGGESTIONS = [
   'Rispondi a una domanda',
 ];
 
-export default function MainChat() {
+export default function MainChat({ providerInfo, onChangeProvider }) {
   const [inputVal, setInputVal] = useState('');
   const [messages, setMessages] = useState([]);
   const [ws, setWs] = useState(null);
@@ -221,6 +221,8 @@ export default function MainChat() {
         activeSessionId={resumeSessionId}
         refreshTrigger={sidebarRefresh}
         connState={connState}
+        providerInfo={providerInfo}
+        onChangeProvider={onChangeProvider}
       />
 
       {/* Center — Chat Panel */}

@@ -18,7 +18,7 @@ The backend is a FastAPI server that manages WebSockets to communicate with the 
 cd backend
 python -m venv venv
 source venv/bin/activate
-pip install fastapi uvicorn websockets pydantic
+pip install fastapi uvicorn websockets pydantic pyyaml httpx python-multipart
 fastapi dev server.py
 # Or run using uvicorn: uvicorn server:app --reload
 ```
@@ -42,7 +42,18 @@ npm run dev
 ### 3. Usage
 
 Once both the backend and frontend are running, open the URL provided by Vite (usually `http://localhost:5173`) in your browser. 
-Follow the Guided Installation to configure the provider, and then you'll enter the Main Chat to interact with Hermes!
+
+On first launch you'll be asked to **choose your local LLM provider**:
+
+| Provider | Default Port | Description |
+|---|---|---|
+| **Ollama** | `11434` | Most popular local model runner. Simple CLI. |
+| **llama.cpp** | `8080` | Bare-metal C++ inference with GGUF models. |
+| **LM Studio** | `1234` | Desktop GUI, download & serve models visually. |
+
+Select your provider, test the connection, choose a model, and you're in.
+
+> **All three backends run outside of Docker on your host machine.** The UI only connects to them over HTTP — nothing is bundled or containerized.
 
 ---
 
@@ -53,20 +64,25 @@ The Docker setup runs the backend and serves the built React frontend from a sin
 ### Prerequisites
 
 - **Docker** and **Docker Compose** installed
-- **Ollama** running on the host machine (if using a local model)
+- One of the following running on your **host machine** (outside Docker):
+  - **Ollama** (port 11434)
+  - **llama.cpp** / llama-server (port 8080)
+  - **LM Studio** (port 1234)
 - **Hermes CLI** configured at `~/.hermes/config.yaml`
 
-### 1. Update your Ollama URL (local models only)
+### 1. Start your local LLM provider
 
-If `~/.hermes/config.yaml` points to `http://localhost:11434`, update it to use the host gateway so Docker can reach Ollama on your machine:
+Make sure one of the three backends is running on your host before starting Docker:
 
-```yaml
-# ~/.hermes/config.yaml
-custom_providers:
-  - name: Local (localhost:11434)
-    base_url: http://host.docker.internal:11434/v1   # ← change this
-    api_key: ollama
-    model: qwen3.5:9b
+```bash
+# Ollama
+ollama serve
+
+# llama.cpp  
+llama-server -m model.gguf --port 8080
+
+# LM Studio
+# Start via the desktop app, enable "Local Server" on port 1234
 ```
 
 ### 2. Build and run
@@ -75,11 +91,12 @@ custom_providers:
 docker-compose up --build
 ```
 
-The UI will be available at **`http://localhost:8000`**.
+The UI will be available at **`http://localhost:8000`**. On first visit, select your provider through the setup wizard.
 
 ### 3. Notes
 
 - Your `~/.hermes` directory is mounted into the container — config changes and sessions persist across restarts.
+- Docker uses `host.docker.internal` to reach your host-side LLM server — this is configured automatically.
 - To run in the background: `docker-compose up -d`
 - To stop: `docker-compose down`
-- If using a cloud provider (Anthropic, OpenAI, etc.) instead of Ollama, no URL changes are needed.
+- If using a cloud provider (Anthropic, OpenAI, etc.), skip the local provider setup in the UI.

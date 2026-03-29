@@ -11,8 +11,9 @@ import re
 import shutil
 import yaml
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
+import httpx
 
 app = FastAPI()
 
@@ -372,6 +373,190 @@ async def update_apikey(body: ProviderKeyUpdate):
         return {"status": "success", "provider": prov_val}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Local LLM provider configuration
+# ---------------------------------------------------------------------------
+
+LOCAL_PROVIDER_PRESETS = {
+    "ollama": {
+        "label": "Ollama",
+        "default_port": 11434,
+        "api_key": "ollama",
+        "model_placeholder": "qwen3.5:9b",
+    },
+    "llamacpp": {
+        "label": "llama.cpp",
+        "default_port": 8080,
+        "api_key": "no-key",
+        "model_placeholder": "Qwen3.5-9B.Q5_K_M.gguf",
+    },
+    "lmstudio": {
+        "label": "LM Studio",
+        "default_port": 1234,
+        "api_key": "lm-studio",
+        "model_placeholder": "qwen3.5-9b",
+    },
+}
+
+
+def _detect_provider_type(entry: dict) -> str:
+    """Guess which local provider type a custom_providers entry represents."""
+    base_url = (entry.get("base_url") or "").lower()
+    api_key = (entry.get("api_key") or "").lower()
+    name = (entry.get("name") or "").lower()
+    # Port-based detection is most reliable
+    if ":11434" in base_url:
+        return "ollama"
+    if ":1234" in base_url:
+        return "lmstudio"
+    if ":8080" in base_url:
+        return "llamacpp"
+    # Fall back to api_key / name heuristics
+    if api_key == "ollama" or "ollama" in name:
+        return "ollama"
+    if api_key == "lm-studio" or "lm studio" in name or "lmstudio" in name:
+        return "lmstudio"
+    # Default to llamacpp for unknown
+    return "llamacpp"
+
+
+def _parse_host_port(base_url: str) -> tuple:
+    """Extract host and port from a base_url like http://localhost:8080/v1."""
+    import re as _re
+    m = _re.search(r'https?://([^:/]+):(\d+)', base_url)
+    if m:
+        return m.group(1), int(m.group(2))
+    return "localhost", 8080
+
+
+def _write_hermes_config(cfg: dict):
+    """Write config dict back to ~/.hermes/config.yaml."""
+    config_path = Path.home() / ".hermes" / "config.yaml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(config_path, "w") as f:
+        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+
+
+class LocalProviderSetup(BaseModel):
+    provider: str  # "ollama" | "llamacpp" | "lmstudio"
+    host: str = "localhost"
+    port: int
+    model: str
+
+
+@app.get("/api/config/local-provider/status")
+async def local_provider_status():
+    """Check whether a local LLM provider is configured in custom_providers."""
+    cfg = get_hermes_config()
+    custom = cfg.get("custom_providers", [])
+
+    if not custom:
+        return {"configured": False, "provider": None}
+
+    entry = custom[0]  # Use first entry
+    ptype = _detect_provider_type(entry)
+    host, port = _parse_host_port(entry.get("base_url", ""))
+
+    return {
+        "configured": True,
+        "provider": ptype,
+        "label": LOCAL_PROVIDER_PRESETS.get(ptype, {}).get("label", ptype),
+        "host": host,
+        "port": port,
+        "model": entry.get("model", ""),
+        "base_url": entry.get("base_url", ""),
+    }
+
+
+@app.post("/api/config/local-provider")
+async def set_local_provider(body: LocalProviderSetup):
+    """Configure a local LLM provider (Ollama / llama.cpp / LM Studio).
+
+    Writes the correct custom_providers entry into ~/.hermes/config.yaml.
+    """
+    preset = LOCAL_PROVIDER_PRESETS.get(body.provider)
+    if not preset:
+        return {"status": "error", "message": f"Unknown provider '{body.provider}'"}
+
+    host = body.host.strip() or "localhost"
+    port = body.port or preset["default_port"]
+    model = body.model.strip()
+    if not model:
+        return {"status": "error", "message": "Model name cannot be empty."}
+
+    base_url = f"http://{host}:{port}/v1"
+    api_key = preset["api_key"]
+
+    # Read current config
+    cfg = get_hermes_config()
+
+    # Set custom_providers (replace any existing local entry)
+    cfg["custom_providers"] = [{
+        "name": f"{preset['label']} ({host}:{port})",
+        "base_url": base_url,
+        "api_key": api_key,
+        "model": model,
+    }]
+
+    # Also set the top-level model so hermes uses it
+    cfg["model"] = model
+
+    try:
+        _write_hermes_config(cfg)
+        return {
+            "status": "success",
+            "provider": body.provider,
+            "base_url": base_url,
+            "model": model,
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/api/config/local-provider/test")
+async def test_local_provider(host: str = "localhost", port: int = 8080):
+    """Test connectivity to a local LLM provider and discover available models.
+
+    Makes a GET to http://{host}:{port}/v1/models (OpenAI-compatible endpoint)
+    and returns the list of model IDs if successful.
+    """
+    url = f"http://{host}:{port}/v1/models"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                data = resp.json()
+                models = []
+                if isinstance(data, dict) and "data" in data:
+                    models = [m.get("id", "") for m in data["data"] if m.get("id")]
+                return {
+                    "status": "ok",
+                    "reachable": True,
+                    "models": models,
+                }
+            else:
+                return {
+                    "status": "error",
+                    "reachable": True,
+                    "models": [],
+                    "message": f"Server returned HTTP {resp.status_code}",
+                }
+    except httpx.ConnectError:
+        return {
+            "status": "error",
+            "reachable": False,
+            "models": [],
+            "message": f"Cannot connect to {host}:{port}. Is the service running?",
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "reachable": False,
+            "models": [],
+            "message": str(e),
+        }
 
 
 # ---------------------------------------------------------------------------

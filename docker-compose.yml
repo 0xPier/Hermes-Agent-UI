@@ -8,9 +8,9 @@ services:
       - HERMES_AGENT_CMD=hermes
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=INFO
-      # Ollama runs on the host — this makes host.docker.internal resolve correctly on Linux too
-      # If your Ollama URL in ~/.hermes/config.yaml uses localhost:11434, you need to update it
-      # to host.docker.internal:11434 for Docker to reach it, or set a custom provider URL.
+      # Local LLM provider (Ollama / llama.cpp / LM Studio) runs on the host machine
+      # host.docker.internal lets Docker reach host services (configured automatically)
+      # Provider is selected through the UI on first launch — no manual config needed
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

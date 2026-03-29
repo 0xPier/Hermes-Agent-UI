@@ -1,10 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
-import { Plus, Search, MessageSquare, Loader2, MoreHorizontal, Pencil, Trash2, X, Check, Database, Lock } from 'lucide-react';
+import { Plus, Search, MessageSquare, Loader2, MoreHorizontal, Pencil, Trash2, X, Check, Database, Lock, Settings } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import ArcaLogo from './ArcaLogo';
 import './ConversationSidebar.css';
 
-export default function ConversationSidebar({ onNewChat, onResumeSession, activeSessionId, refreshTrigger, connState }) {
+export default function ConversationSidebar({ onNewChat, onResumeSession, activeSessionId, refreshTrigger, connState, providerInfo, onChangeProvider }) {
   const [loading, setLoading] = useState(true);
   const [sessions, setSessions] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -259,12 +259,23 @@ export default function ConversationSidebar({ onNewChat, onResumeSession, active
         )}
       </div>
 
-      {/* Footer — Status indicators */}
+      {/* Footer — Status + Provider indicators */}
       <div className="sidebar-footer" style={{ borderTop: '1px solid var(--border-subtle)', padding: '16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
           <div className={`status-dot ${connState === 'connected' ? 'online' : connState === 'connecting' ? 'connecting' : 'offline'}`} />
           Agente attivo — Assistente documenti
         </div>
+        {providerInfo && (
+          <button
+            className="provider-badge"
+            onClick={(e) => { e.stopPropagation(); onChangeProvider?.(); }}
+            title="Cambia provider locale"
+          >
+            <span className="badge-dot" />
+            {providerInfo.label || providerInfo.provider} :{providerInfo.port}
+            <Settings size={10} style={{ marginLeft: '2px', opacity: 0.6 }} />
+          </button>
+        )}
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
           <Lock size={12} />
           Connesso in locale

@@ -4,3 +4,4 @@ websockets
 pydantic
 pyyaml
 python-multipart
+httpx
