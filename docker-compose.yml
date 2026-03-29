@@ -1,10 +1,14 @@
-
 services:
   hermes-ui:
     build: .
     ports:
       - "8000:8000"
     environment:
+# Hermes UI — Local-First Agent Interface
+# This runs the UI and standard Hermes backend in a container.
+# If you are using Local Mode (Ollama, llama.cpp), those engines
+# should run natively on your host machine (Mac/Windows/Linux).
+# The new setup wizard will handle connecting them automatically.
       - HERMES_AGENT_CMD=hermes
       - PYTHONUNBUFFERED=1
       - LOG_LEVEL=INFO

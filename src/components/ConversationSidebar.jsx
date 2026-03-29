@@ -3,7 +3,7 @@ import { Plus, Search, MessageSquare, Settings, Loader2, Zap, MoreHorizontal, Pe
 import { motion, AnimatePresence } from 'framer-motion';
 import './ConversationSidebar.css';
 
-export default function ConversationSidebar({ onNewChat, onResumeSession, onOpenSettings, activeSessionId, refreshTrigger }) {
+export default function ConversationSidebar({ onNewChat, onResumeSession, onOpenSettings, activeSessionId, refreshTrigger, providerInfo }) {
   const [loading, setLoading] = useState(true);
   const [sessions, setSessions] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -305,6 +305,16 @@ export default function ConversationSidebar({ onNewChat, onResumeSession, onOpen
           <Settings size={16} />
           Settings
         </button>
+
+        {providerInfo && (
+          <div className="sidebar-provider-badge">
+            <div className="provider-badge-inner">
+              <span className="provider-model">{providerInfo.model || 'Auto'}</span>
+              <span className="provider-label">via {providerInfo.provider || 'cloud'}</span>
+            </div>
+            <div className="provider-status-dot online"></div>
+          </div>
+        )}
       </div>
     </aside>
   );

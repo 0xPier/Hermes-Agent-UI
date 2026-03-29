@@ -263,6 +263,7 @@ export default function MainChat({ initialConfig }) {
         onOpenSettings={() => setSettingsOpen(true)}
         activeSessionId={resumeSessionId}
         refreshTrigger={sidebarRefresh}
+        providerInfo={{ model: activeModel, provider: activeProvider }}
       />
 
       {/* Center — Chat Panel */}

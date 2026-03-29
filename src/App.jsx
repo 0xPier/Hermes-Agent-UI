@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import GuidedInstallation from './components/GuidedInstallation';
+import SetupWizard from './components/SetupWizard';
 import MainChat from './components/MainChat';
 
 function App() {
@@ -79,7 +79,7 @@ function App() {
   return (
     <div className="app-container" style={{ width: '100%', height: '100vh' }}>
       {appState === 'wizard' ? (
-        <GuidedInstallation onComplete={handleInstallComplete} />
+        <SetupWizard onComplete={handleInstallComplete} />
       ) : (
         <MainChat initialConfig={configData} />
       )}
