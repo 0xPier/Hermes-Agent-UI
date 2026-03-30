@@ -1,8 +1,16 @@
 # Hermes UI
 
+<p align="center">
+  <img src="docs/assets/chat_interface.png" width="800" alt="Hermes Chat Interface">
+</p>
+
 A dynamic, web-based UI for the Hermes autonomous AI agent. This interface bridges the gap between terminal hackers and non-technical users, offering a beautiful, guided experience for configuring AI providers and interacting with the `hermes` CLI.
 
 ## Key Features
+
+<p align="center">
+  <img src="docs/assets/setup_wizard.png" width="600" alt="Hermes Setup Wizard">
+</p>
 
 - **Guided Setup Wizard**: Seamlessly detects your installation and walks you through configuring either Cloud (OpenRouter, Anthropic, etc.) or Local (Ollama, llama.cpp, LM Studio) AI engines.
 - **Messaging Integrations**: Quickly check the status of and get connection instructions for Telegram, Discord, and WhatsApp bridges.
