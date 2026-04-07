@@ -30,6 +30,10 @@ let platformStatus = { telegram: false, discord: false, whatsapp: false, signal:
 let expandedPlatform = null;
 let configResult = null;
 
+// Existing config detection
+let existingConfig = null;
+let configFetched = false;
+
 const CLOUD_PROVIDERS = [
   { value: "auto", label: "Auto (Recommended)" },
   { value: "openrouter", label: "OpenRouter" },
@@ -42,6 +46,45 @@ const LOCAL_PROVIDERS = [
   { value: "llamacpp", label: "llama.cpp", defaultPort: 8080 },
   { value: "lmstudio", label: "LM Studio", defaultPort: 1234 }
 ];
+
+async function fetchExistingConfig() {
+  if (configFetched) return;
+  configFetched = true;
+  try {
+    const res = await fetch("/api/config/current");
+    if (res.ok) {
+      existingConfig = await res.json();
+      // Pre-fill form with existing config if available
+      if (existingConfig.has_config) {
+        if (existingConfig.provider) {
+          // Check if it's a known cloud provider
+          const knownProviders = CLOUD_PROVIDERS.map(p => p.value);
+          if (knownProviders.includes(existingConfig.provider)) {
+            cloudProvider = existingConfig.provider;
+            mode = "cloud";
+          } else if (existingConfig.custom_providers && existingConfig.custom_providers.length > 0) {
+            // Custom provider likely means local
+            mode = "local";
+            const cp = existingConfig.custom_providers[0];
+            if (cp.base_url) {
+              const urlMatch = cp.base_url.match(/https?:\/\/([^:]+):(\d+)/);
+              if (urlMatch) {
+                localHost = urlMatch[1];
+                localPort = urlMatch[2];
+              }
+            }
+          }
+        }
+        if (existingConfig.model) {
+          cloudSelectedModel = existingConfig.model;
+          localSelectedModel = existingConfig.model;
+        }
+      }
+    }
+  } catch (e) {
+    // Silently fail -- config may not exist
+  }
+}
 
 async function checkHealth() {
   setLoading(true);
@@ -59,6 +102,9 @@ async function checkHealth() {
       const modData = await modRes.json();
       cloudModels = modData.groups || [];
     }
+    
+    // Fetch existing config in parallel
+    await fetchExistingConfig();
   } catch (e) {
     isInstalled = false;
   }
@@ -132,6 +178,41 @@ async function handleTestLocalProvider() {
 }
 
 async function handleSaveProvider() {
+  // Check if config will change
+  let willModifyConfig = false;
+  let changeSummary = "";
+  
+  if (mode === "cloud") {
+    willModifyConfig = !existingConfig?.has_config || 
+                       existingConfig.provider !== cloudProvider || 
+                       existingConfig.model !== cloudSelectedModel;
+    if (willModifyConfig) {
+      changeSummary = `Provider: ${cloudProvider}\nModel: ${cloudSelectedModel}`;
+      if (existingConfig?.has_config) {
+        changeSummary = `Current: ${existingConfig.provider || 'none'} / ${existingConfig.model || 'none'}\n\nNew: ${cloudProvider} / ${cloudSelectedModel}`;
+      }
+    }
+  } else {
+    willModifyConfig = !existingConfig?.has_config || 
+                       existingConfig.model !== localSelectedModel;
+    if (willModifyConfig) {
+      changeSummary = `Provider: ${localProvider} (${localHost}:${localPort})\nModel: ${localSelectedModel}`;
+      if (existingConfig?.has_config) {
+        changeSummary = `Current: ${existingConfig.provider || 'none'} / ${existingConfig.model || 'none'}\n\nNew: ${localProvider} / ${localSelectedModel}`;
+      }
+    }
+  }
+  
+  // Show confirmation if config will be modified
+  if (willModifyConfig && existingConfig?.has_config) {
+    const confirmed = confirm(
+      "This will update your Hermes configuration.\n\n" +
+      changeSummary + "\n\n" +
+      "Do you want to proceed?"
+    );
+    if (!confirmed) return;
+  }
+  
   setLoading(true);
   if (mode === "cloud") {
     try {

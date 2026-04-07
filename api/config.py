@@ -288,7 +288,30 @@ CLI_TOOLSETS = get_config().get('platform_toolsets', {}).get('cli', _DEFAULT_TOO
 
 # ── Model / provider discovery ───────────────────────────────────────────────
 
-# Hardcoded fallback models (used when no config.yaml or agent is available)
+# Hardcoded fallback models (used when hermes_cli is unavailable or offline).
+# These are the most commonly used models across providers.
+_FALLBACK_MODELS = [
+    # OpenRouter
+    {'id': 'openrouter/auto', 'label': 'OpenRouter Auto'},
+    {'id': 'openrouter/free', 'label': 'OpenRouter Free'},
+    # OpenAI
+    {'id': 'openai/gpt-4o', 'label': 'GPT-4o'},
+    {'id': 'openai/gpt-4o-mini', 'label': 'GPT-4o Mini'},
+    {'id': 'openai/o3', 'label': 'o3'},
+    {'id': 'openai/o4-mini', 'label': 'o4 Mini'},
+    # Anthropic
+    {'id': 'anthropic/claude-sonnet-4-6', 'label': 'Claude Sonnet 4.6'},
+    {'id': 'anthropic/claude-sonnet-4-5', 'label': 'Claude Sonnet 4.5'},
+    {'id': 'anthropic/claude-haiku-3-5', 'label': 'Claude Haiku 3.5'},
+    # Google
+    {'id': 'google/gemini-2.5-pro', 'label': 'Gemini 2.5 Pro'},
+    {'id': 'google/gemini-2.0-flash', 'label': 'Gemini 2.0 Flash'},
+    # DeepSeek
+    {'id': 'deepseek/deepseek-chat-v3-0324', 'label': 'DeepSeek V3'},
+    # Meta
+    {'id': 'meta-llama/llama-4-scout', 'label': 'Llama 4 Scout'},
+    {'id': 'meta-llama/llama-4-maverick', 'label': 'Llama 4 Maverick'},
+]
 
 
 # Provider display names for known Hermes provider IDs
@@ -551,10 +574,16 @@ def get_available_models() -> dict:
                 })
                 
     except Exception as e:
-        # Fallback if hermes_cli imports fail or error out
+        # Fallback if hermes_cli imports fail or error out (e.g. offline, no agent installed).
+        # Use the hardcoded fallback model list so users still have choices.
+        fallback_models = list(_FALLBACK_MODELS)
+        # Ensure the default model is in the list
+        default_label = default_model.split('/')[-1]
+        if not any(m['id'] == default_model for m in fallback_models):
+            fallback_models.insert(0, {'id': default_model, 'label': default_label})
         groups.append({
-            'provider': 'Fallback',
-            'models': [{'id': default_model, 'label': default_model.split('/')[-1]}]
+            'provider': 'Available Models',
+            'models': fallback_models
         })
 
     return {

@@ -71,13 +71,21 @@ async function send(){
     const cancelBtn=$('btnCancel');
     if(cancelBtn) cancelBtn.style.display='';
     // watchdog: if no activity for 45s, clear busy state
+    // Use a Set to track all active watchdogs to avoid race conditions
+    // when multiple streams are in flight (e.g. rapid re-send).
+    if (!S._activeWatchdogs) S._activeWatchdogs = new Set();
+    const watchdogId = streamId; // use streamId as unique key
     const watchdog = setTimeout(() => {
+      S._activeWatchdogs.delete(watchdogId);
+      // Only trigger error if this stream is still the active one
       if (S.busy && S.activeStreamId === streamId) {
         console.warn("Watchdog: stream timed out without terminal event");
-        _handleStreamError("Connection timed out");
+        _handleStreamError(streamId, "Connection timed out");
       }
     }, 45000);
-    S._activeWatchdog = watchdog;
+    S._activeWatchdogs.add(watchdogId);
+    S._watchdogTimers = S._watchdogTimers || {};
+    S._watchdogTimers[streamId] = watchdog;
   }catch(e){
     delete INFLIGHT[activeSid];
     stopApprovalPolling();
@@ -275,7 +283,26 @@ async function send(){
     });
   }
 
-  function _handleStreamError(msg){
+  function _handleStreamError(streamIdArg, msg){
+    // Support multiple calling conventions:
+    //   _handleStreamError()                    -- from SSE error handler (no args)
+    //   _handleStreamError("Connection timed out")  -- from watchdog (msg only)
+    //   _handleStreamError(streamId, "msg")     -- from watchdog with streamId
+    if(msg === undefined && typeof streamIdArg === 'string' && streamIdArg.length > 2){
+      // Called with just msg (e.g. from watchdog timeout)
+      msg = streamIdArg;
+      streamIdArg = streamId;
+    }
+    // Default streamIdArg to the current stream if not provided
+    if(!streamIdArg) streamIdArg = streamId;
+    
+    // Clear the watchdog timer for this specific stream
+    if(S._watchdogTimers && S._watchdogTimers[streamIdArg]){
+      clearTimeout(S._watchdogTimers[streamIdArg]);
+      delete S._watchdogTimers[streamIdArg];
+    }
+    if(S._activeWatchdogs) S._activeWatchdogs.delete(streamIdArg);
+    
     delete INFLIGHT[activeSid];clearInflight();stopApprovalPolling();
     if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard();
     if(S.session&&S.session.session_id===activeSid){
@@ -287,10 +314,9 @@ async function send(){
       if(typeof trackBackgroundError==='function'){
         // Look up session title from the session list cache so the banner names it correctly
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
-        trackBackgroundError(activeSid,_errTitle,'Connection lost');
+        trackBackgroundError(activeSid,_errTitle,msg||'Connection lost');
       }
     }
-    if(S._activeWatchdog) { clearTimeout(S._activeWatchdog); S._activeWatchdog=null; }
     if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setStatus(msg?`Error: ${msg}`:'Error: Connection lost');}
   }
 

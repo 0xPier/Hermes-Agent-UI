@@ -163,6 +163,27 @@ def handle_get(handler, parsed) -> bool:
         # Used by Wizard
         return j(handler, {'platforms': {}})
 
+    if parsed.path == '/api/config/current':
+        # Read current Hermes config.yaml (read-only, no modifications)
+        from api.config import HOME, get_config
+        config = get_config()
+        model_cfg = config.get('model', {})
+        current_provider = ''
+        current_model = ''
+        if isinstance(model_cfg, str):
+            current_model = model_cfg
+        elif isinstance(model_cfg, dict):
+            current_provider = model_cfg.get('provider', '')
+            current_model = model_cfg.get('default', '') or model_cfg.get('model', '')
+        # Check for custom providers
+        custom_providers = config.get('custom_providers', [])
+        return j(handler, {
+            'provider': current_provider,
+            'model': current_model,
+            'custom_providers': custom_providers,
+            'has_config': bool(current_provider or current_model or custom_providers),
+        })
+
     if parsed.path == '/api/config/local-provider/test':
         host = parse_qs(parsed.query).get('host', ['localhost'])[0]
         port = parse_qs(parsed.query).get('port', ['8080'])[0]
@@ -432,33 +453,29 @@ def handle_post(handler, parsed) -> bool:
         return j(handler, {'session': s.compact() | {'messages': s.messages}})
 
     if parsed.path == '/api/config/update':
-        import subprocess
-        config_updates = body.get('config', {})
-        for k, v in config_updates.items():
-            subprocess.run(['hermes', 'config', 'set', k, str(v)], capture_output=True)
+        # Store provider config in WebUI settings only -- do NOT modify
+        # the user's Hermes CLI config.yaml without explicit consent.
+        # The wizard uses this to remember the user's choice for the UI.
+        settings = load_settings()
+        settings['wizard_provider'] = body.get('config', {}).get('provider', '')
+        settings['wizard_model'] = body.get('config', {}).get('model', '')
+        save_settings(settings)
         return j(handler, {'status': 'success'})
 
     if parsed.path == '/api/config/local-provider':
-        from api.config import HOME
-        import subprocess, re
-        
-        provider = body.get('provider')
+        # Store local provider config in WebUI settings only -- do NOT modify
+        # the user's Hermes CLI config.yaml without explicit consent.
+        provider = body.get('provider', '')
         host = body.get('host', 'localhost')
         port = body.get('port', 11434)
         model = body.get('model', '')
         
-        subprocess.run(['hermes', 'config', 'set', 'model', model], capture_output=True)
-        config_path = HOME / '.hermes' / 'config.yaml'
-        
-        if config_path.exists():
-            content = config_path.read_text()
-            content = re.sub(r'custom_providers:[\s\S]*', '', content)
-            new_provider = f"\ncustom_providers:\n  - name: '{provider} ({host}:{port})'\n    base_url: 'http://{host}:{port}/v1'\n    api_key: '{provider}'\n    model: '{model}'\n"
-            config_path.write_text(content.strip() + new_provider)
-        else:
-            new_provider = f"model: '{model}'\ncustom_providers:\n  - name: '{provider} ({host}:{port})'\n    base_url: 'http://{host}:{port}/v1'\n    api_key: '{provider}'\n    model: '{model}'\n"
-            config_path.parent.mkdir(parents=True, exist_ok=True)
-            config_path.write_text(new_provider)
+        settings = load_settings()
+        settings['wizard_provider'] = provider
+        settings['wizard_model'] = model
+        settings['wizard_local_host'] = host
+        settings['wizard_local_port'] = int(port) if isinstance(port, (int, str)) else port
+        save_settings(settings)
             
         return j(handler, {'status': 'success'})
 
