@@ -1,16 +1,7 @@
-# ── Build Stage (Frontend) ──
-FROM node:20-slim AS build-stage
+FROM python:3.12-slim
 WORKDIR /app
-COPY package*.json ./
-RUN npm install
-COPY . .
-RUN npm run build
 
-# ── Final Stage (Backend + Frontend) ──
-FROM python:3.11-slim
-WORKDIR /app/backend
-
-# Install system dependencies for Hermes CLI and enhanced monitoring
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     curl \
     git \
@@ -19,26 +10,30 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python requirements
-COPY backend/requirements.txt .
+COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt && \
     git clone --recurse-submodules https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent && \
     pip install --no-cache-dir /tmp/hermes-agent && \
     rm -rf /tmp/hermes-agent
 
-# Copy built frontend from build-stage to /app/dist
-COPY --from=build-stage /app/dist /app/dist
+# Copy backend source and frontend static files
+COPY api/ api/
+COPY static/ static/
+COPY server.py .
 
-# Copy backend source
-COPY backend/ .
+# Create necessary directories
+RUN mkdir -p /root/.hermes && chmod -R 755 /app
 
-# Create necessary directories and set permissions
-RUN mkdir -p /app/.hermes && \
-    chmod -R 755 /app
+# Set environments for Hermes Web UI so it binds dynamically globally
+ENV HERMES_WEBUI_HOST=0.0.0.0
+ENV HERMES_WEBUI_PORT=8000
 
 # Expose port and start
 EXPOSE 8000
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/api/health || exit 1
 
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info"]
+# Check health endpoint at port 8000
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+CMD ["python", "server.py"]

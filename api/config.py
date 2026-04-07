@@ -1,0 +1,681 @@
+"""
+Hermes Web UI -- Shared configuration, constants, and global state.
+Imported by all other api/* modules and by server.py.
+
+Discovery order for all paths:
+  1. Explicit environment variable
+  2. Filesystem heuristics (sibling checkout, parent dir, common install locations)
+  3. Hardened defaults relative to $HOME
+  4. Fail loudly with a human-readable fix-it message if required modules are missing
+"""
+import collections
+import json
+import os
+import sys
+import threading
+import time
+import traceback
+import uuid
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+# ── Basic layout ──────────────────────────────────────────────────────────────
+HOME    = Path.home()
+# REPO_ROOT is the directory that contains this file's parent (api/ -> repo root)
+REPO_ROOT = Path(__file__).parent.parent.resolve()
+
+# ── Network config (env-overridable) ─────────────────────────────────────────
+HOST = os.getenv('HERMES_WEBUI_HOST', '127.0.0.1')
+PORT = int(os.getenv('HERMES_WEBUI_PORT', '8787'))
+
+# ── State directory (env-overridable, never inside repo) ──────────────────────
+STATE_DIR = Path(os.getenv(
+    'HERMES_WEBUI_STATE_DIR',
+    str(HOME / '.hermes' / 'webui')
+)).expanduser().resolve()
+
+SESSION_DIR           = STATE_DIR / 'sessions'
+WORKSPACES_FILE       = STATE_DIR / 'workspaces.json'
+SESSION_INDEX_FILE    = SESSION_DIR / '_index.json'
+SETTINGS_FILE         = STATE_DIR / 'settings.json'
+LAST_WORKSPACE_FILE   = STATE_DIR / 'last_workspace.txt'
+PROJECTS_FILE         = STATE_DIR / 'projects.json'
+
+# ── Hermes agent directory discovery ─────────────────────────────────────────
+def _discover_agent_dir() -> Path:
+    """
+    Locate the hermes-agent checkout using a multi-strategy search.
+
+    Priority:
+      1. HERMES_WEBUI_AGENT_DIR env var  -- explicit override always wins
+      2. HERMES_HOME / hermes-agent      -- e.g. ~/.hermes/hermes-agent
+      3. Sibling of this repo            -- ../hermes-agent
+      4. Parent of this repo             -- ../../hermes-agent (nested layout)
+      5. Common install paths            -- ~/.hermes/hermes-agent (again as fallback)
+      6. HOME / hermes-agent             -- ~/hermes-agent (simple flat layout)
+    """
+    candidates = []
+
+    # 1. Explicit env var
+    if os.getenv('HERMES_WEBUI_AGENT_DIR'):
+        candidates.append(Path(os.getenv('HERMES_WEBUI_AGENT_DIR')).expanduser().resolve())
+
+    # 2. HERMES_HOME / hermes-agent
+    hermes_home = os.getenv('HERMES_HOME', str(HOME / '.hermes'))
+    candidates.append(Path(hermes_home).expanduser() / 'hermes-agent')
+
+    # 3. Sibling: <repo-root>/../hermes-agent
+    candidates.append(REPO_ROOT.parent / 'hermes-agent')
+
+    # 4. Parent is the agent repo itself (repo cloned inside hermes-agent/)
+    if (REPO_ROOT.parent / 'run_agent.py').exists():
+        candidates.append(REPO_ROOT.parent)
+
+    # 5. ~/.hermes/hermes-agent (explicit common path)
+    candidates.append(HOME / '.hermes' / 'hermes-agent')
+
+    # 6. ~/hermes-agent
+    candidates.append(HOME / 'hermes-agent')
+
+    for path in candidates:
+        if path.exists() and (path / 'run_agent.py').exists():
+            return path.resolve()
+
+    return None
+
+
+def _discover_python(agent_dir: Path) -> str:
+    """
+    Locate a Python executable that has the Hermes agent dependencies installed.
+
+    Priority:
+      1. HERMES_WEBUI_PYTHON env var
+      2. Agent venv at <agent_dir>/venv/bin/python
+      3. Local .venv inside this repo
+      4. System python3
+    """
+    if os.getenv('HERMES_WEBUI_PYTHON'):
+        return os.getenv('HERMES_WEBUI_PYTHON')
+
+    if agent_dir:
+        venv_py = agent_dir / 'venv' / 'bin' / 'python'
+        if venv_py.exists():
+            return str(venv_py)
+
+        # Windows layout
+        venv_py_win = agent_dir / 'venv' / 'Scripts' / 'python.exe'
+        if venv_py_win.exists():
+            return str(venv_py_win)
+
+    # Local .venv inside this repo
+    local_venv = REPO_ROOT / '.venv' / 'bin' / 'python'
+    if local_venv.exists():
+        return str(local_venv)
+
+    # Fall back to system python3
+    import shutil
+    for name in ('python3', 'python'):
+        found = shutil.which(name)
+        if found:
+            return found
+
+    return 'python3'
+
+
+# Run discovery
+_AGENT_DIR = _discover_agent_dir()
+PYTHON_EXE = _discover_python(_AGENT_DIR)
+
+# ── Inject agent dir into sys.path so Hermes modules are importable ──────────
+
+# When users (or CI builds) run `pip install --target .` or
+# `pip install -t .` inside the hermes-agent checkout, third-party
+# package directories (openai/, pydantic/, requests/, etc.) end up
+# alongside real Hermes source files.  Putting _AGENT_DIR at the
+# FRONT of sys.path means Python resolves `import pydantic` from that
+# local directory — which breaks whenever the host platform differs
+# from the container (e.g. macOS .so files inside a Linux image).
+#
+# Fix: insert _AGENT_DIR at the END of sys.path.  Python searches
+# entries in order, so site-packages resolves pip packages correctly,
+# and Hermes-specific modules (run_agent, hermes/, etc.) still
+# resolve because they do not exist in site-packages.
+
+if _AGENT_DIR is not None:
+    if str(_AGENT_DIR) not in sys.path:
+        sys.path.append(str(_AGENT_DIR))
+    _HERMES_FOUND = True
+else:
+    _HERMES_FOUND = False
+
+# ── Config file (reloadable -- supports profile switching) ──────────────────
+_cfg_cache = {}
+_cfg_lock = threading.Lock()
+
+def _get_config_path() -> Path:
+    """Return config.yaml path for the active profile."""
+    env_override = os.getenv('HERMES_CONFIG_PATH')
+    if env_override:
+        return Path(env_override).expanduser()
+    try:
+        from api.profiles import get_active_hermes_home
+        return get_active_hermes_home() / 'config.yaml'
+    except ImportError:
+        return HOME / '.hermes' / 'config.yaml'
+
+def get_config() -> dict:
+    """Return the cached config dict, loading from disk if needed."""
+    if not _cfg_cache:
+        reload_config()
+    return _cfg_cache
+
+def reload_config() -> None:
+    """Reload config.yaml from the active profile's directory."""
+    with _cfg_lock:
+        _cfg_cache.clear()
+        config_path = _get_config_path()
+        try:
+            import yaml as _yaml
+            if config_path.exists():
+                loaded = _yaml.safe_load(config_path.read_text())
+                if isinstance(loaded, dict):
+                    _cfg_cache.update(loaded)
+        except Exception:
+            pass
+
+# Initial load
+reload_config()
+cfg = _cfg_cache  # alias for backward compat with existing references
+
+# ── Default workspace discovery ───────────────────────────────────────────────
+def _discover_default_workspace() -> Path:
+    """
+    Resolve the default workspace in order:
+      1. HERMES_WEBUI_DEFAULT_WORKSPACE env var
+      2. ~/workspace (common Hermes convention)
+      3. STATE_DIR / workspace (isolated fallback)
+    """
+    if os.getenv('HERMES_WEBUI_DEFAULT_WORKSPACE'):
+        return Path(os.getenv('HERMES_WEBUI_DEFAULT_WORKSPACE')).expanduser().resolve()
+
+    common = HOME / 'workspace'
+    if common.exists():
+        return common.resolve()
+
+    return (STATE_DIR / 'workspace').resolve()
+
+DEFAULT_WORKSPACE = _discover_default_workspace()
+DEFAULT_MODEL     = os.getenv('HERMES_WEBUI_DEFAULT_MODEL', 'openai/gpt-5.4-mini')
+
+# ── Startup diagnostics ───────────────────────────────────────────────────────
+def print_startup_config() -> None:
+    """Print detected configuration at startup so the user can verify what was found."""
+    ok   = '\033[32m[ok]\033[0m'
+    warn = '\033[33m[!!]\033[0m'
+    err  = '\033[31m[XX]\033[0m'
+
+    lines = [
+        '',
+        '  Hermes Web UI -- startup config',
+        '  --------------------------------',
+        f'  repo root   : {REPO_ROOT}',
+        f'  agent dir   : {_AGENT_DIR if _AGENT_DIR else "NOT FOUND"}  {ok if _AGENT_DIR else err}',
+        f'  python      : {PYTHON_EXE}',
+        f'  state dir   : {STATE_DIR}',
+        f'  workspace   : {DEFAULT_WORKSPACE}',
+        f'  host:port   : {HOST}:{PORT}',
+        f'  config file : {_get_config_path()}  {"(found)" if _get_config_path().exists() else "(not found, using defaults)"}',
+        '',
+    ]
+    print('\n'.join(lines), flush=True)
+
+    if not _HERMES_FOUND:
+        print(
+            f'{err}  Could not find the Hermes agent directory.\n'
+            '      The server will start but agent features will not work.\n'
+            '\n'
+            '      To fix, set one of:\n'
+            '        export HERMES_WEBUI_AGENT_DIR=/path/to/hermes-agent\n'
+            '        export HERMES_HOME=/path/to/.hermes\n'
+            '\n'
+            '      Or clone hermes-agent as a sibling of this repo:\n'
+            '        git clone <hermes-agent-repo> ../hermes-agent\n',
+            flush=True
+        )
+
+def verify_hermes_imports() -> tuple:
+    """
+    Attempt to import the key Hermes modules.
+    Returns (ok: bool, missing: list[str], errors: dict[str, str]).
+    """
+    required = ['run_agent']
+    missing  = []
+    errors   = {}
+    for mod in required:
+        try:
+            __import__(mod)
+        except Exception as e:
+            missing.append(mod)
+            # Capture the full error message so startup logs show WHY
+            # (e.g. pydantic_core .so mismatch) instead of just the name.
+            errors[mod] = f"{type(e).__name__}: {e}"
+    return (len(missing) == 0), missing, errors
+
+# ── Limits ───────────────────────────────────────────────────────────────────
+MAX_FILE_BYTES   = 200_000
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+
+# ── File type maps ───────────────────────────────────────────────────────────
+IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.ico', '.bmp'}
+MD_EXTS    = {'.md', '.markdown', '.mdown'}
+CODE_EXTS  = {'.py', '.js', '.ts', '.jsx', '.tsx', '.css', '.html', '.json',
+              '.yaml', '.yml', '.toml', '.sh', '.bash', '.txt', '.log', '.env',
+              '.csv', '.xml', '.sql', '.rs', '.go', '.java', '.c', '.cpp', '.h'}
+MIME_MAP = {
+    '.png':'image/png', '.jpg':'image/jpeg', '.jpeg':'image/jpeg',
+    '.gif':'image/gif', '.svg':'image/svg+xml', '.webp':'image/webp',
+    '.ico':'image/x-icon', '.bmp':'image/bmp',
+    '.pdf':'application/pdf', '.json':'application/json',
+}
+
+# ── Toolsets (from config.yaml or hardcoded default) ─────────────────────────
+_DEFAULT_TOOLSETS = [
+    'browser', 'clarify', 'code_execution', 'cronjob', 'delegation', 'file',
+    'image_gen', 'memory', 'session_search', 'skills', 'terminal', 'todo',
+    'web', 'webhook',
+]
+CLI_TOOLSETS = get_config().get('platform_toolsets', {}).get('cli', _DEFAULT_TOOLSETS)
+
+# ── Model / provider discovery ───────────────────────────────────────────────
+
+# Hardcoded fallback models (used when no config.yaml or agent is available)
+
+
+# Provider display names for known Hermes provider IDs
+_PROVIDER_DISPLAY = {
+    'nous': 'Nous Portal', 'openrouter': 'OpenRouter', 'anthropic': 'Anthropic',
+    'openai': 'OpenAI', 'openai-codex': 'OpenAI Codex', 'copilot': 'GitHub Copilot',
+    'zai': 'Z.AI / GLM', 'kimi-coding': 'Kimi / Moonshot', 'deepseek': 'DeepSeek',
+    'minimax': 'MiniMax', 'google': 'Google', 'meta-llama': 'Meta Llama',
+    'huggingface': 'HuggingFace', 'alibaba': 'Alibaba',
+    'ollama': 'Ollama', 'lmstudio': 'LM Studio',
+}
+
+def _get_cli_provider_models():
+    """Import and return the canonical _PROVIDER_MODELS from hermes_cli."""
+    try:
+        from hermes_cli.models import _PROVIDER_MODELS as pm
+        return pm
+    except ImportError:
+        return {}
+
+
+def resolve_model_provider(model_id: str) -> tuple:
+    """Resolve bare model name, provider, and base_url for AIAgent.
+
+    Model IDs from the dropdown may include a provider prefix
+    (e.g. 'anthropic/claude-sonnet-4.6').  Direct-API providers expect
+    bare model names, while OpenRouter expects the full provider/model path.
+
+    Also reads base_url from config.yaml so providers with custom endpoints
+    (e.g. MiniMax, Z.AI) are routed correctly.
+
+    Returns (model, provider, base_url) where provider and base_url may be None.
+    """
+    config_provider = None
+    config_base_url = None
+    model_cfg = cfg.get('model', {})
+    if isinstance(model_cfg, dict):
+        config_provider = model_cfg.get('provider')
+        config_base_url = model_cfg.get('base_url')
+
+    model_id = (model_id or '').strip()
+    if not model_id:
+        return model_id, config_provider, config_base_url
+
+    if '/' in model_id:
+        prefix, bare = model_id.split('/', 1)
+        # OpenRouter always needs the full provider/model path (e.g. openrouter/free,
+        # anthropic/claude-sonnet-4.6). Never strip the prefix for OpenRouter.
+        if config_provider == 'openrouter':
+            return model_id, 'openrouter', config_base_url
+        # If prefix matches config provider exactly, strip it and use that provider directly.
+        # e.g. config=anthropic, model=anthropic/claude-... → bare name to anthropic API
+        if config_provider and prefix == config_provider:
+            return bare, config_provider, config_base_url
+        # If prefix does NOT match config provider, check if it's a known provider.
+        if prefix in _get_cli_provider_models() and prefix != config_provider:
+            return model_id, 'openrouter', None
+
+    return model_id, config_provider, config_base_url
+
+
+def get_available_models() -> dict:
+    """
+    Return available models grouped by provider.
+
+    Discovery order:
+      1. Read config.yaml 'model' section for active provider info
+      2. Check for known API keys in env or ~/.hermes/.env
+      3. Fetch models from custom endpoint if base_url is configured
+      4. Fall back to hardcoded model list (OpenRouter-style)
+
+    Returns: {
+        'active_provider': str|None,
+        'default_model': str,
+        'groups': [{'provider': str, 'models': [{'id': str, 'label': str}]}]
+    }
+    """
+    active_provider = None
+    default_model = DEFAULT_MODEL
+    groups = []
+
+    # 1. Read config.yaml model section
+    cfg_base_url = ''  # must be defined before conditional blocks (#117)
+    model_cfg = cfg.get('model', {})
+    cfg_base_url = ''
+    if isinstance(model_cfg, str):
+        default_model = model_cfg
+    elif isinstance(model_cfg, dict):
+        active_provider = model_cfg.get('provider')
+        cfg_default = model_cfg.get('default', '')
+        cfg_base_url = model_cfg.get('base_url', '')
+        if cfg_default:
+            default_model = cfg_default
+
+    # 2. Also check env vars for model override
+    env_model = os.getenv('HERMES_MODEL') or os.getenv('OPENAI_MODEL') or os.getenv('LLM_MODEL')
+    if env_model:
+        default_model = env_model.strip()
+
+    # 3. Try to read auth store for active provider (if hermes is installed)
+    if not active_provider:
+        try:
+            from api.profiles import get_active_hermes_home as _gah
+            auth_store_path = _gah() / 'auth.json'
+        except ImportError:
+            auth_store_path = HOME / '.hermes' / 'auth.json'
+        if auth_store_path.exists():
+            try:
+                import json as _j
+                auth_store = _j.loads(auth_store_path.read_text())
+                active_provider = auth_store.get('active_provider')
+            except Exception:
+                pass
+
+    # 4. Check for API keys that imply available providers
+    try:
+        from api.profiles import get_active_hermes_home as _gah2
+        hermes_env_path = _gah2() / '.env'
+    except ImportError:
+        hermes_env_path = HOME / '.hermes' / '.env'
+    env_keys = {}
+    if hermes_env_path.exists():
+        try:
+            for line in hermes_env_path.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    k, v = line.split('=', 1)
+                    env_keys[k.strip()] = v.strip().strip('"').strip("'")
+        except Exception:
+            pass
+
+    # Merge with actual env
+    all_env = {**env_keys}
+    for k in ('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY',
+              'GOOGLE_API_KEY', 'GLM_API_KEY', 'KIMI_API_KEY', 'DEEPSEEK_API_KEY'):
+        val = os.getenv(k)
+        if val:
+            all_env[k] = val
+
+    detected_providers = set()
+    if active_provider:
+        detected_providers.add(active_provider)
+    if all_env.get('ANTHROPIC_API_KEY'):
+        detected_providers.add('anthropic')
+    if all_env.get('OPENAI_API_KEY'):
+        detected_providers.add('openai')
+    if all_env.get('OPENROUTER_API_KEY'):
+        detected_providers.add('openrouter')
+    if all_env.get('GOOGLE_API_KEY'):
+        detected_providers.add('google')
+    if all_env.get('GLM_API_KEY'):
+        detected_providers.add('zai')
+    if all_env.get('KIMI_API_KEY'):
+        detected_providers.add('kimi-coding')
+    if all_env.get('MINIMAX_API_KEY') or all_env.get('MINIMAX_CN_API_KEY'):
+        detected_providers.add('minimax')
+    if all_env.get('DEEPSEEK_API_KEY'):
+        detected_providers.add('deepseek')
+
+    # 3. Fetch models from custom endpoint if base_url is configured
+    auto_detected_models = []
+    if cfg_base_url:
+        try:
+            import ipaddress
+            import urllib.request
+
+            # Normalize the base_url and build models endpoint
+            base_url = cfg_base_url.strip()
+            if base_url.endswith('/v1'):
+                endpoint_url = base_url[:-3] + '/models'
+            else:
+                endpoint_url = base_url + '/v1/models'
+
+            # Detect provider from base_url
+            provider = 'custom'
+            parsed = urlparse(base_url if '://' in base_url else f'http://{base_url}')
+            host = (parsed.netloc or parsed.path).lower()
+
+            if parsed.hostname:
+                try:
+                    addr = ipaddress.ip_address(parsed.hostname)
+                    if addr.is_private or addr.is_loopback or addr.is_link_local:
+                        if 'ollama' in host or '127.0.0.1' in host or 'localhost' in host:
+                            provider = 'ollama'
+                        elif 'lmstudio' in host or 'lm-studio' in host:
+                            provider = 'lmstudio'
+                        else:
+                            provider = 'local'
+                except ValueError:
+                    pass
+
+            # Resolve API key from environment
+            headers = {}
+            api_key_vars = ('HERMES_API_KEY', 'HERMES_OPENAI_API_KEY', 'OPENAI_API_KEY',
+                            'LOCAL_API_KEY', 'OPENROUTER_API_KEY', 'API_KEY')
+            for key in api_key_vars:
+                api_key = os.getenv(key)
+                if api_key:
+                    headers['Authorization'] = f'Bearer {api_key}'
+                    break
+
+            # Fetch model list from endpoint
+            req = urllib.request.Request(endpoint_url, method='GET')
+            for k, v in headers.items():
+                req.add_header(k, v)
+            with urllib.request.urlopen(req, timeout=10) as response:
+                data = json.loads(response.read().decode('utf-8'))
+
+            # Handle both OpenAI-compatible and llama.cpp response formats
+            models_list = []
+            if 'data' in data and isinstance(data['data'], list):
+                models_list = data['data']
+            elif 'models' in data and isinstance(data['models'], list):
+                models_list = data['models']
+
+            for model in models_list:
+                if not isinstance(model, dict):
+                    continue
+                model_id = model.get('id', '') or model.get('name', '') or model.get('model', '')
+                model_name = model.get('name', '') or model.get('model', '') or model_id
+                if model_id and model_name:
+                    auto_detected_models.append({'id': model_id, 'label': model_name})
+                    detected_providers.add(provider.lower())
+        except Exception:
+            pass  # custom endpoint unreachable or misconfigured -- fail silently
+
+    # 5. Build model groups using hermes_cli source of truth
+    try:
+        from hermes_cli.models import list_available_providers, curated_models_for_provider
+        
+        # Use hermes_cli's built-in provider discovery (checks auth status)
+        cli_providers = list_available_providers()
+        
+        for pinfo in cli_providers:
+            # Skip providers that are not authenticated unless they are 'openrouter' or 'custom'
+            # (which may have public models or env-based auth not tracked by CLI auth.json)
+            pid = pinfo['id']
+            is_authenticated = pinfo.get('authenticated', False)
+            
+            if not is_authenticated and pid not in ('openrouter', 'custom'):
+                continue
+            
+            # Fetch the actual models for this provider
+            curated = curated_models_for_provider(pid)
+            if not curated and pid != 'custom':
+                continue
+                
+            models = []
+            for mid, desc in curated:
+                label = mid.split('/')[-1]
+                if desc:
+                    label = f"{label} ({desc})"
+                models.append({'id': mid, 'label': label})
+                
+            if models or pid == 'custom':
+                groups.append({
+                    'provider': pinfo['label'],
+                    'id': pid,
+                    'models': models if models else auto_detected_models
+                })
+                
+    except Exception as e:
+        # Fallback if hermes_cli imports fail or error out
+        groups.append({
+            'provider': 'Fallback',
+            'models': [{'id': default_model, 'label': default_model.split('/')[-1]}]
+        })
+
+    return {
+        'active_provider': active_provider,
+        'default_model': default_model,
+        'groups': groups,
+    }
+
+
+# ── Static file path ─────────────────────────────────────────────────────────
+_INDEX_HTML_PATH = REPO_ROOT / 'static' / 'index.html'
+
+# ── Thread synchronisation ───────────────────────────────────────────────────
+LOCK              = threading.Lock()
+SESSIONS_MAX      = 100
+CHAT_LOCK         = threading.Lock()
+STREAMS: dict     = {}
+STREAMS_LOCK      = threading.Lock()
+CANCEL_FLAGS: dict = {}
+SERVER_START_TIME = time.time()
+
+# ── Thread-local env context ─────────────────────────────────────────────────
+_thread_ctx = threading.local()
+
+def _set_thread_env(**kwargs):
+    _thread_ctx.env = kwargs
+
+def _clear_thread_env():
+    _thread_ctx.env = {}
+
+# ── Per-session agent locks ───────────────────────────────────────────────────
+SESSION_AGENT_LOCKS: dict = {}
+SESSION_AGENT_LOCKS_LOCK  = threading.Lock()
+
+def _get_session_agent_lock(session_id: str) -> threading.Lock:
+    with SESSION_AGENT_LOCKS_LOCK:
+        if session_id not in SESSION_AGENT_LOCKS:
+            SESSION_AGENT_LOCKS[session_id] = threading.Lock()
+        return SESSION_AGENT_LOCKS[session_id]
+
+# ── Settings persistence ─────────────────────────────────────────────────────
+
+_SETTINGS_DEFAULTS = {
+    'default_model': DEFAULT_MODEL,
+    'default_workspace': str(DEFAULT_WORKSPACE),
+    'send_key': 'enter',  # 'enter' or 'ctrl+enter'
+    'show_token_usage': False,  # show input/output token badge below assistant messages
+    'show_cli_sessions': False,  # merge CLI sessions from state.db into the sidebar
+    'sync_to_insights': False,  # mirror WebUI token usage to state.db for /insights
+    'check_for_updates': True,  # check if webui/agent repos are behind upstream
+    'theme': 'dark',  # active UI theme name (no enum gate -- allows custom themes)
+    'bot_name': os.getenv('HERMES_WEBUI_BOT_NAME', 'Hermes'),  # display name for the assistant
+    'password_hash': None,  # SHA-256 hash; None = auth disabled
+}
+
+def load_settings() -> dict:
+    """Load settings from disk, merging with defaults for any missing keys."""
+    settings = dict(_SETTINGS_DEFAULTS)
+    if SETTINGS_FILE.exists():
+        try:
+            stored = json.loads(SETTINGS_FILE.read_text(encoding='utf-8'))
+            if isinstance(stored, dict):
+                settings.update(stored)
+        except Exception:
+            pass
+    return settings
+
+_SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {'password_hash'}
+_SETTINGS_ENUM_VALUES = {
+    'send_key': {'enter', 'ctrl+enter'},
+}
+_SETTINGS_BOOL_KEYS = {'show_token_usage', 'show_cli_sessions', 'sync_to_insights', 'check_for_updates'}
+
+def save_settings(settings: dict) -> dict:
+    """Save settings to disk. Returns the merged settings. Ignores unknown keys."""
+    import hashlib as _hl
+    current = load_settings()
+    # Handle _set_password: hash and store as password_hash
+    raw_pw = settings.pop('_set_password', None)
+    if raw_pw and isinstance(raw_pw, str) and raw_pw.strip():
+        salt = str(STATE_DIR).encode()
+        current['password_hash'] = _hl.sha256(salt + raw_pw.strip().encode()).hexdigest()
+    # Handle _clear_password: explicitly disable auth
+    if settings.pop('_clear_password', False):
+        current['password_hash'] = None
+    for k, v in settings.items():
+        if k in _SETTINGS_ALLOWED_KEYS:
+            # Validate enum-constrained keys
+            if k in _SETTINGS_ENUM_VALUES and v not in _SETTINGS_ENUM_VALUES[k]:
+                continue
+            # Coerce bool keys
+            if k in _SETTINGS_BOOL_KEYS:
+                v = bool(v)
+            current[k] = v
+    SETTINGS_FILE.write_text(
+        json.dumps(current, ensure_ascii=False, indent=2),
+        encoding='utf-8',
+    )
+    # Update runtime defaults so new sessions use them immediately
+    global DEFAULT_MODEL, DEFAULT_WORKSPACE
+    if 'default_model' in current:
+        DEFAULT_MODEL = current['default_model']
+    if 'default_workspace' in current:
+        DEFAULT_WORKSPACE = Path(current['default_workspace']).expanduser().resolve()
+    return current
+
+# Apply saved settings on startup (override env-derived defaults)
+_startup_settings = load_settings()
+if SETTINGS_FILE.exists():
+    if _startup_settings.get('default_model'):
+        DEFAULT_MODEL = _startup_settings['default_model']
+    if _startup_settings.get('default_workspace'):
+        DEFAULT_WORKSPACE = Path(_startup_settings['default_workspace']).expanduser().resolve()
+
+# ── SESSIONS in-memory cache (LRU OrderedDict) ───────────────────────────────
+SESSIONS: collections.OrderedDict = collections.OrderedDict()
+
+# ── Profile state initialisation ────────────────────────────────────────────
+# Must run after all imports are resolved to correctly patch module-level caches
+try:
+    from api.profiles import init_profile_state
+    init_profile_state()
+except ImportError:
+    pass  # hermes_cli not available -- default profile only
